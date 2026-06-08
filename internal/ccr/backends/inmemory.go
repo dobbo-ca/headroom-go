@@ -30,6 +30,9 @@ func newInMemory(capacity int, ttl time.Duration) *inMemory {
 	return &inMemory{cap: capacity, ttl: ttl, items: make(map[string]*list.Element), order: list.New()}
 }
 
+// Put inserts or updates an entry. Re-Putting an existing key updates its
+// payload and TTL in place and does NOT move it to the back of the FIFO order:
+// eviction is by insertion order, not recency — this is intentional.
 func (m *inMemory) Put(hash, payload string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

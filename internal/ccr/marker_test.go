@@ -21,6 +21,13 @@ func TestParseMarkerRejectsNonMarker(t *testing.T) {
 	if _, ok := ParseMarker("<<ccr:short>>"); ok {
 		t.Fatal("ParseMarker accepted wrong-length hash")
 	}
+	h := "0123456789abcdef01234567"
+	if _, ok := ParseMarker(MarkerForCell(h, "json", 42)); ok {
+		t.Fatal("ParseMarker accepted cell marker")
+	}
+	if _, ok := ParseMarker(MarkerForLossy(h, 3)); ok {
+		t.Fatal("ParseMarker accepted lossy marker")
+	}
 }
 
 func TestCellAndLossyMarkersDistinct(t *testing.T) {

@@ -9,6 +9,8 @@ import (
 type Store interface {
 	Put(hash, payload string)
 	Get(hash string) (string, bool)
+	// Len reports the number of stored entries. Expiry is lazy (enforced on
+	// Get), so Len may include expired-but-not-yet-evicted entries.
 	Len() int
 }
 

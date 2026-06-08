@@ -29,8 +29,10 @@ func TestSQLiteTTLExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { timeNow = time.Now })
+	timeNow = func() time.Time { return time.Unix(0, 0) }
 	s.Put("a", "1")
-	time.Sleep(20 * time.Millisecond)
+	timeNow = func() time.Time { return time.Unix(100, 0) } // past the TTL
 	if _, ok := s.Get("a"); ok {
 		t.Fatal("expected entry expired by TTL")
 	}

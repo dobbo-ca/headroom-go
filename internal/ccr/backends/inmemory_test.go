@@ -36,8 +36,10 @@ func TestInMemoryFIFOEviction(t *testing.T) {
 
 func TestInMemoryTTLExpiry(t *testing.T) {
 	s := newInMemory(10, 10*time.Millisecond)
+	t.Cleanup(func() { timeNow = time.Now })
+	timeNow = func() time.Time { return time.Unix(0, 0) }
 	s.Put("a", "1")
-	time.Sleep(20 * time.Millisecond)
+	timeNow = func() time.Time { return time.Unix(100, 0) } // past the TTL
 	if _, ok := s.Get("a"); ok {
 		t.Fatal("expected entry expired by TTL")
 	}
