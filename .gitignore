@@ -1,0 +1,5 @@
+/headroom
+/headroom-proxy
+*.test
+*.out
+.DS_Store
