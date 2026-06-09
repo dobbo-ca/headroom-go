@@ -1,0 +1,18 @@
+# Attribution
+
+headroom-go is a clean-room Go reimplementation of headroom by Tejas Chopra.
+
+- Original project: https://github.com/chopratejas/headroom (Python/Rust, Apache-2.0)
+- This port: https://github.com/dobbo-ca/headroom-go (Go, Apache-2.0)
+
+headroom is an LLM context-compression layer: it compresses tool outputs, logs,
+diffs, search results, and RAG chunks before they reach the model. This port
+re-implements the compression pipeline and the proxy/MCP/CLI surfaces in Go.
+
+It is a clean-room reimplementation of the original's pipeline and behavior,
+not a line-by-line translation, and deliberately does NOT reproduce upstream's
+cross-implementation byte-parity (Python float-formatting quirks). The CCR
+marker formats and compression contracts are kept self-consistent within this
+implementation.
+
+The original Apache-2.0 copyright is preserved in LICENSE.

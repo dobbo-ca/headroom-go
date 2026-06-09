@@ -1,0 +1,27 @@
+package tokenizer
+
+import "testing"
+
+func TestGetTokenizerFallsBackToEstimator(t *testing.T) {
+	// An unknown model must still return a working tokenizer (estimator).
+	tok := GetTokenizer("some-unknown-model")
+	if tok == nil {
+		t.Fatal("GetTokenizer returned nil")
+	}
+	if tok.CountText("hello world this is a test") < 1 {
+		t.Fatal("tokenizer counted < 1")
+	}
+}
+
+func TestGetTokenizerOpenAIUsesTiktoken(t *testing.T) {
+	// The offline vocab loader is compiled in, so an OpenAI model MUST resolve
+	// to the tiktoken backend. A fallback to the estimator here would indicate a
+	// wiring bug (loader not set before GetEncoding), so assert rather than skip.
+	tok := GetTokenizer("gpt-4o")
+	if tok.Backend() != BackendTiktoken {
+		t.Fatalf("gpt-4o should use tiktoken (offline vocab is embedded), got backend %v", tok.Backend())
+	}
+	if tok.CountText("hello") < 1 {
+		t.Fatal("tiktoken counted < 1")
+	}
+}

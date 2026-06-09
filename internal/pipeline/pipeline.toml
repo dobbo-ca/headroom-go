@@ -1,0 +1,4 @@
+# Default compression pipeline gating thresholds. Ported from upstream defaults.
+reformat_target_ratio = 0.5    # stop running reformats once current/original <= this
+bloat_threshold       = 0.5    # an offload runs if its bloat estimate >= this
+offload_fallback_ratio = 0.85  # ...or if reformats barely helped (ratio > this) and bloat > 0
