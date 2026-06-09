@@ -18,6 +18,14 @@ type DetectionResult struct {
 	Confidence float32
 }
 
+// These regexes are deliberately cheap heuristics, not exact classifiers. Known
+// fuzziness (tracked for refinement against upstream's signal detector): diffRe
+// fires on `--- `/`+++ ` lines in changelogs; buildRe matches `error:`/`warning:`
+// substrings in prose; searchRe's `[^\d]` tail excludes grep hits whose matched
+// text starts with a digit. RE2 has no lookahead, so "`:line:` but not
+// `:line:col:`" cannot be expressed cleanly; ordering (search before build) plus
+// the `[^\d]` tail covers the common cases. Refining these boundaries is a
+// follow-up; do not change the ordering.
 var (
 	diffRe   = regexp.MustCompile(`(?m)^(diff --git |--- |\+\+\+ |@@ .* @@)`)
 	htmlRe   = regexp.MustCompile(`(?i)^\s*<(!doctype|html|head|body|div|span|table|ul|ol|p|a)\b`)

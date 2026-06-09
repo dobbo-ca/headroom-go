@@ -19,6 +19,7 @@ func TestDetectContentType(t *testing.T) {
 		{"search results", "src/main.go:42: func main() {\nsrc/util.go:7: var x = 1\n", transform.SearchResults},
 		{"build output", "main.go:10:2: undefined: foo\nFAILED build with 1 error\n", transform.BuildOutput},
 		{"source code", "package main\n\nfunc main() {\n\tprintln(\"hi\")\n}\n", transform.SourceCode},
+		{"json object not array", `{"a":1,"b":2}`, transform.PlainText}, // only arrays are JsonArray
 		{"plain text", "the quick brown fox jumps over the lazy dog and keeps going", transform.PlainText},
 		{"empty is text", "", transform.PlainText},
 	}
