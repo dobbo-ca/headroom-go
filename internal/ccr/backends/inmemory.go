@@ -10,7 +10,9 @@ import (
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 )
 
-func init() { ccr.RegisterInMemory(func(c int, ttl time.Duration) ccr.Store { return newInMemory(c, ttl) }) }
+func init() {
+	ccr.RegisterInMemory(func(c int, ttl time.Duration) ccr.Store { return newInMemory(c, ttl) })
+}
 
 type entry struct {
 	hash    string

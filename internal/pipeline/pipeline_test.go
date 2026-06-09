@@ -46,18 +46,18 @@ func (f fakeOffload) Apply(content string, _ transform.CompressionContext, store
 
 type errReformat struct{ types []transform.ContentType }
 
-func (errReformat) Name() string                          { return "errReformat" }
-func (e errReformat) AppliesTo() []transform.ContentType  { return e.types }
+func (errReformat) Name() string                         { return "errReformat" }
+func (e errReformat) AppliesTo() []transform.ContentType { return e.types }
 func (errReformat) Apply(string) (transform.ReformatOutput, error) {
 	return transform.ReformatOutput{}, transform.ErrInternal
 }
 
 type errOffload struct{ types []transform.ContentType }
 
-func (errOffload) Name() string                          { return "errOffload" }
-func (e errOffload) AppliesTo() []transform.ContentType  { return e.types }
-func (errOffload) EstimateBloat(string) float32          { return 0.9 }
-func (errOffload) Confidence() float32                   { return 1 }
+func (errOffload) Name() string                         { return "errOffload" }
+func (e errOffload) AppliesTo() []transform.ContentType { return e.types }
+func (errOffload) EstimateBloat(string) float32         { return 0.9 }
+func (errOffload) Confidence() float32                  { return 1 }
 func (errOffload) Apply(string, transform.CompressionContext, ccr.Store) (transform.OffloadOutput, error) {
 	return transform.OffloadOutput{}, transform.ErrSkipped
 }

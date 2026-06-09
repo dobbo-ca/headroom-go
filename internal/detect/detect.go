@@ -29,7 +29,7 @@ type DetectionResult struct {
 var (
 	diffRe   = regexp.MustCompile(`(?m)^(diff --git |--- |\+\+\+ |@@ .* @@)`)
 	htmlRe   = regexp.MustCompile(`(?i)^\s*<(!doctype|html|head|body|div|span|table|ul|ol|p|a)\b`)
-	searchRe = regexp.MustCompile(`(?m)^[^\s:][^:\n]*:\d+:[^\d]`)       // path:line: (not path:line:col:)
+	searchRe = regexp.MustCompile(`(?m)^[^\s:][^:\n]*:\d+:[^\d]`) // path:line: (not path:line:col:)
 	buildRe  = regexp.MustCompile(`(?im)(:\d+:\d+:|error:|warning:|FAILED|panic:|undefined:)`)
 	codeRe   = regexp.MustCompile(`(?m)^\s*(package |import |func |class |def |fn |public |private |const |let |var |#include)\b`)
 )
