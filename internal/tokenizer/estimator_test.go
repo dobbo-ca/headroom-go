@@ -27,3 +27,14 @@ func TestEstimatorBackend(t *testing.T) {
 		t.Fatal("estimator must report BackendEstimation")
 	}
 }
+
+func TestEstimatorDefaultCPT(t *testing.T) {
+	// Zero value (CharsPerToken == 0) must fall back to the default 4.0.
+	c := EstimatingCounter{}
+	if got := c.CountText("abcd"); got != 1 { // 4 runes / 4.0 = 1
+		t.Errorf("CountText with default cpt = %d, want 1", got)
+	}
+	if got := c.CountText("abcdefgh"); got != 2 { // 8 runes / 4.0 = 2
+		t.Errorf("CountText with default cpt = %d, want 2", got)
+	}
+}

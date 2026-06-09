@@ -14,9 +14,12 @@ func TestGetTokenizerFallsBackToEstimator(t *testing.T) {
 }
 
 func TestGetTokenizerOpenAIUsesTiktoken(t *testing.T) {
+	// The offline vocab loader is compiled in, so an OpenAI model MUST resolve
+	// to the tiktoken backend. A fallback to the estimator here would indicate a
+	// wiring bug (loader not set before GetEncoding), so assert rather than skip.
 	tok := GetTokenizer("gpt-4o")
 	if tok.Backend() != BackendTiktoken {
-		t.Skip("offline tiktoken vocab unavailable in this environment")
+		t.Fatalf("gpt-4o should use tiktoken (offline vocab is embedded), got backend %v", tok.Backend())
 	}
 	if tok.CountText("hello") < 1 {
 		t.Fatal("tiktoken counted < 1")
