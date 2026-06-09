@@ -10,7 +10,7 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
 
 ## Done
 
-- [ ] (Plan 1) Foundation: transform interfaces, CCR, tokenizer, detector, pipeline, router.
+- [x] (Plan 1) Foundation: transform interfaces, CCR, tokenizer, detector, pipeline, router.
 
 ## Follow-ups
 
