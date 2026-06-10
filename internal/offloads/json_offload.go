@@ -3,6 +3,7 @@ package offloads
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/transform"
@@ -45,7 +46,7 @@ func (o *JsonOffload) EstimateBloat(content string) float32 {
 	if content == "" {
 		return 0
 	}
-	if !strings.HasPrefix(strings.TrimLeft(content, " \t\r\n"), "[") {
+	if !strings.HasPrefix(strings.TrimLeftFunc(content, unicode.IsSpace), "[") {
 		return 0
 	}
 	seps := countRowSeparators(content)

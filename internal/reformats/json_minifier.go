@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/dobbo-ca/headroom-go/internal/transform"
@@ -45,6 +46,12 @@ func (JsonMinifier) Apply(content string) (transform.ReformatOutput, error) {
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return transform.ReformatOutput{}, fmt.Errorf("invalid input for %s: %s: %w", jsonMinifierName, err, transform.ErrInvalidInput)
+	}
+	// Require the whole input to be a single JSON value: serde_json::from_str
+	// rejects trailing characters, but json.Decoder consumes only the first
+	// value and would silently drop the rest. Reject anything after EOF.
+	if _, err := dec.Token(); err != io.EOF {
+		return transform.ReformatOutput{}, fmt.Errorf("invalid input for %s: trailing characters: %w", jsonMinifierName, transform.ErrInvalidInput)
 	}
 
 	// Re-emit compact with HTML escaping OFF (matches serde: no \u escaping of

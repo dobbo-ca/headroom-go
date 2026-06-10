@@ -243,8 +243,27 @@ func asciiDigit(c byte) bool { return c >= '0' && c <= '9' }
 // scoreMatches assigns each match a score in [0,1]: +0.3 per context word
 // (len>2, lowercased substring), +importance category bump when boostErrors,
 // +0.4 per config keyword substring hit; clamp 1.0.
+// asciiLower lowercases only ASCII A-Z, leaving bytes >= 0x80 untouched. This
+// mirrors Rust's to_ascii_lowercase used by upstream score_matches (NOT the
+// Unicode-aware to_lowercase used by the BM25 tokenizer), so non-ASCII content
+// scores identically to upstream.
+func asciiLower(s string) string {
+	b := []byte(s)
+	changed := false
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return string(b)
+}
+
 func (c *SearchCompressor) scoreMatches(files []*fileMatches, context string) {
-	contextLower := strings.ToLower(context)
+	contextLower := asciiLower(context)
 	var contextWords []string
 	for _, w := range strings.Fields(contextLower) {
 		if len(w) > 2 {
@@ -256,7 +275,7 @@ func (c *SearchCompressor) scoreMatches(files []*fileMatches, context string) {
 		for idx := range fm.matches {
 			m := &fm.matches[idx]
 			score := 0.0
-			contentLower := strings.ToLower(m.content)
+			contentLower := asciiLower(m.content)
 			for _, w := range contextWords {
 				if strings.Contains(contentLower, w) {
 					score += 0.3
@@ -278,7 +297,7 @@ func (c *SearchCompressor) scoreMatches(files []*fileMatches, context string) {
 				}
 			}
 			for _, kw := range c.config.contextKeywords {
-				if strings.Contains(contentLower, strings.ToLower(kw)) {
+				if strings.Contains(contentLower, asciiLower(kw)) {
 					score += 0.4
 				}
 			}
