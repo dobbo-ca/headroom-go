@@ -11,6 +11,11 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
 ## Done
 
 - [x] (Plan 1) Foundation: transform interfaces, CCR, tokenizer, detector, pipeline, router.
+- [x] (Plan 2) Heuristic compressors: reformats (json_minifier, log_template),
+      compress engines (log 6-stage, diff, search), offloads
+      (log/diff/diff_noise/json; search built-unregistered), signals,
+      relevance (BM25+Hybrid), adaptive (simplified), tagprotect, toolpairs;
+      wired into router.NewDefault. SmartCrusher (JSON crush) is Plan 3.
 
 ## Follow-ups
 
