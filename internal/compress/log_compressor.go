@@ -537,8 +537,14 @@ func (c *LogCompressor) selectIndices(parsed []logLine, cap int) []int {
 		selected = append(selected, i)
 	}
 	if cap > 0 && len(selected) > cap {
-		sort.SliceStable(selected, func(a, b int) bool {
-			return parsed[selected[a]].score > parsed[selected[b]].score
+		// Total-order sort: score descending, ties broken by ascending source
+		// index. The tie-break makes the cap truncation deterministic (I4) even
+		// though `selected` was gathered from a map in randomized order.
+		sort.Slice(selected, func(a, b int) bool {
+			if parsed[selected[a]].score != parsed[selected[b]].score {
+				return parsed[selected[a]].score > parsed[selected[b]].score
+			}
+			return selected[a] < selected[b]
 		})
 		selected = selected[:cap]
 	}

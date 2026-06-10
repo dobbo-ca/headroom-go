@@ -90,6 +90,30 @@ func TestLogCompressorRatioGate(t *testing.T) {
 	}
 }
 
+func TestLogCompressorDeterministicAtCap(t *testing.T) {
+	// 200 distinct lines that all score identically (each "===" prefix => summary,
+	// level Unknown => 0.1 base + 0.4 summary boost = 0.5) and are all kept, so
+	// the selected set exceeds the cap (max_total_lines=100) entirely at a score
+	// tie. The map-gathered `selected` slice has randomized order, so without a
+	// total-order tie-break the cap truncation would emit a non-deterministic body
+	// (I4 violation). Compress repeatedly and assert byte-identical output.
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		b.WriteString("=== distinct ")
+		b.WriteString(strings.Repeat("z", i%50+1))
+		b.WriteString(strings.Repeat("q", (i/3)%7+3))
+		b.WriteByte('\n')
+	}
+	in := b.String()
+	first := NewLogCompressor().Compress(in, newStore(t)).Compressed
+	for n := 0; n < 100; n++ {
+		got := NewLogCompressor().Compress(in, newStore(t)).Compressed
+		if got != first {
+			t.Fatalf("compression output is non-deterministic at the cap (run %d)", n)
+		}
+	}
+}
+
 func TestLogCompressorWarningDedup(t *testing.T) {
 	// Warnings differing only in a decimal number normalize (\d+ -> N) to the
 	// same dedup key and collapse to one kept warning (silent dedup, no
