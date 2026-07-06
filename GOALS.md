@@ -16,6 +16,7 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
       (log/diff/diff_noise/json; search built-unregistered), signals,
       relevance (BM25+Hybrid), adaptive (simplified), tagprotect, toolpairs;
       wired into router.NewDefault. SmartCrusher (JSON crush) is Plan 3.
+- [x] (Plan 3) SmartCrusher: lossless compaction table + opaque CCR cells + SmartSample lossy fallback + field_detect + analyzer crushability tree (MAX_DEPTH=50); swapped into JsonOffload. Deferred: Buckets/heterogeneous, stringified-JSON deep nesting, TopN/TimeSeries/ClusterSample, crush_string/number/object + full compute_optimal_k (Kneedle/SimHash/zlib), round-trip recovery of lossless-table opaque cells.
 
 ## Follow-ups
 

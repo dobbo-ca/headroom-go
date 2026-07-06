@@ -21,11 +21,27 @@ type JsonOffload struct {
 
 const jsonConfidence = 0.85
 
-// NewJsonOffload builds a JsonOffload with the Plan-2 passthrough crusher and the
-// upstream config defaults (minArrayRows=5, saturationRows=50).
+// NewJsonOffload builds a JsonOffload with the passthrough crusher (the DI
+// default) and the upstream config defaults (minArrayRows=5, saturationRows=50).
+// The composition root (router.NewDefault) injects the real SmartCrusher via
+// NewJsonOffloadWith; see that constructor for why the crusher is injected rather
+// than constructed here.
 func NewJsonOffload() *JsonOffload {
+	return NewJsonOffloadWith(passthroughCrusher{})
+}
+
+// NewJsonOffloadWith builds a JsonOffload around an injected Crusher (the Plan-3
+// SmartCrusher seam). The crusher is injected — not constructed in this package —
+// because smartcrusher.SmartCrusher.Crush returns offloads.CrushResult, so
+// smartcrusher imports offloads; importing smartcrusher here would form a cycle
+// (offloads -> smartcrusher -> offloads). The concrete crusher is therefore chosen
+// at the composition root (router), which is the only production package free to
+// import both. This keeps the seam type in offloads and offloads free of any
+// smartcrusher dependency, matching the plan's "smartcrusher implements
+// offloads.Crusher" architecture.
+func NewJsonOffloadWith(crusher Crusher) *JsonOffload {
 	return &JsonOffload{
-		crusher:        passthroughCrusher{},
+		crusher:        crusher,
 		minArrayRows:   5,
 		saturationRows: 50,
 	}
