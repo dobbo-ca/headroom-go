@@ -326,18 +326,101 @@ func compactJSON(v any) string {
 
 // marshalOrdered marshals v (orderedmap-aware) to JSON, compact or pretty. HTML
 // escaping is disabled so '<'/'>'/'&' survive verbatim. On error it returns "".
+//
+// The compact path (the byte-critical compressed output) is walked by hand: a
+// plain json.Encoder with SetEscapeHTML(false) does NOT stop the HTML escaping
+// that *orderedmap.OrderedMap.MarshalJSON applies internally, so '<'/'>'/'&'
+// nested inside object string values would otherwise be escaped. The pretty path
+// (opt-in, off the critical path) keeps the encoder for indentation.
 func marshalOrdered(v any, pretty bool) string {
+	if pretty {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(v); err != nil {
+			return ""
+		}
+		// Encoder appends a trailing newline; trim it.
+		return strings.TrimRight(buf.String(), "\n")
+	}
+	var sb strings.Builder
+	if !compactWrite(&sb, v) {
+		return ""
+	}
+	return sb.String()
+}
+
+// compactWrite writes v to sb as compact JSON (no inter-element spaces), object
+// keys in insertion order, with '<'/'>'/'&' left literal (no HTML escaping) and
+// non-ASCII left un-escaped. It returns false if a value type cannot be
+// serialized. Input must be in the decodeJSON shape: *orderedmap.OrderedMap
+// objects, []any arrays, json.Number numbers, string/bool/nil scalars, plus the
+// plain int used for the JSON wrapper's _kept/_total/_size counters.
+func compactWrite(sb *strings.Builder, v any) bool {
+	switch t := v.(type) {
+	case *orderedmap.OrderedMap:
+		sb.WriteByte('{')
+		for i, k := range t.Keys() {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			writeJSONStringNoHTML(sb, k)
+			sb.WriteByte(':')
+			val, _ := t.Get(k)
+			if !compactWrite(sb, val) {
+				return false
+			}
+		}
+		sb.WriteByte('}')
+		return true
+	case []any:
+		sb.WriteByte('[')
+		for i, e := range t {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			if !compactWrite(sb, e) {
+				return false
+			}
+		}
+		sb.WriteByte(']')
+		return true
+	case string:
+		writeJSONStringNoHTML(sb, t)
+		return true
+	case bool:
+		if t {
+			sb.WriteString("true")
+		} else {
+			sb.WriteString("false")
+		}
+		return true
+	case nil:
+		sb.WriteString("null")
+		return true
+	case json.Number:
+		sb.WriteString(t.String())
+		return true
+	case int:
+		sb.WriteString(strconv.Itoa(t))
+		return true
+	default:
+		return false
+	}
+}
+
+// writeJSONStringNoHTML writes s as a JSON string literal using encoding/json's
+// scalar escaping with HTML escaping DISABLED, so '<'/'>'/'&' stay literal and
+// non-ASCII is left un-escaped, matching Python's json.dumps(ensure_ascii=False).
+func writeJSONStringNoHTML(sb *strings.Builder, s string) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if pretty {
-		enc.SetIndent("", "  ")
+	if err := enc.Encode(s); err != nil {
+		return
 	}
-	if err := enc.Encode(v); err != nil {
-		return ""
-	}
-	// Encoder appends a trailing newline; trim it for a compact single-line form.
-	return strings.TrimRight(buf.String(), "\n")
+	sb.WriteString(strings.TrimRight(buf.String(), "\n"))
 }
 
 // firstNonSpaceRune returns the first non-whitespace rune of s (0 if none). It is

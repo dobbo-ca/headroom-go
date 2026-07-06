@@ -132,6 +132,29 @@ func TestFormatCcrMarkerCommaFormShape(t *testing.T) {
 	}
 }
 
+func TestCompactJSONNoHTMLEscape(t *testing.T) {
+	// compactJSON / marshalOrdered must leave '<', '>', '&' LITERAL, including
+	// inside nested object string values (where orderedmap's MarshalJSON would
+	// otherwise HTML-escape them despite the outer SetEscapeHTML(false)).
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"bare string", `"x < y & z > w"`, `"x < y & z > w"`},
+		{"nested object value", `{"a":"x < y & z > w"}`, `{"a":"x < y & z > w"}`},
+		{"array of objects", `[{"a":"p<q"},{"a":"r&s"},{"a":"t>u"}]`, `[{"a":"p<q"},{"a":"r&s"},{"a":"t>u"}]`},
+		{"embedded ccr marker", `{"_ccr_dropped":"<<ccr:abc 5_rows_offloaded>>"}`, `{"_ccr_dropped":"<<ccr:abc 5_rows_offloaded>>"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := compactJSON(decode(t, c.json)); got != c.want {
+				t.Errorf("compactJSON(%s) = %q, want %q", c.json, got, c.want)
+			}
+		})
+	}
+}
+
 func TestHumanizeBytesBoundaries(t *testing.T) {
 	// n<1024 -> "{n}B"; n==1024 -> KB branch; n==1024*1024 -> MB branch; 1 decimal.
 	cases := []struct {

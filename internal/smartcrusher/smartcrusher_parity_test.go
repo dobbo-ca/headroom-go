@@ -252,12 +252,11 @@ func assertArrayFixture(t *testing.T, f fixtureFile, crushed string, sc *SmartCr
 
 	// marker visibility (ccr_marker_visible fixture): the DEFAULT crusher at the
 	// 0.99 gate must emit a space-form lossy marker in the output. It surfaces as
-	// the last-element _ccr_dropped sentinel. We assert on the DECODED array rather
-	// than the raw string because the compact serializer HTML-escapes the angle
-	// brackets ("<<" -> "<<") — orderedmap's nested MarshalJSON re-escapes
-	// regardless of the outer encoder's SetEscapeHTML(false), a known serializer
-	// quirk. Decoding recovers the literal "<<ccr:… rows_offloaded>>" marker, so the
-	// structural check is escaping-agnostic.
+	// the last-element _ccr_dropped sentinel. We assert on the DECODED array so the
+	// structural check is independent of string quoting; the serializer now emits the
+	// literal "<<ccr:… rows_offloaded>>" marker verbatim (no HTML escaping of the
+	// angle brackets) — see TestCompactWriteNoHTMLEscape and the crush-path marker
+	// regression tests in jsonutil_test.go.
 	if f.MarkerVisible {
 		if !isArr || len(arr) == 0 {
 			t.Fatalf("%s: marker-visible fixture did not decode to a non-empty array", f.Name)

@@ -6,7 +6,7 @@
     "losslessMinSavingsRatio": 0.99
   },
   "wasModified": true,
-  "recordedCompressedLen": 823,
+  "recordedCompressedLen": 803,
   "assertRoundTrip": true,
   "keptSubsetInline": true,
   "hasDropSentinel": true,

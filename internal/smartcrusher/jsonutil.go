@@ -117,20 +117,89 @@ func decodeArray(dec *json.Decoder) ([]any, error) {
 // be in the decodeJSON shape (*orderedmap.OrderedMap objects, []any arrays,
 // json.Number numbers) so key order and numeric literals are preserved.
 //
-// encoding/json already emits compact output with no inter-element spaces and
-// orderedmap.OrderedMap marshals in insertion order, so a single Marshal with
-// HTML escaping disabled satisfies the contract.
+// It walks the value tree by hand rather than delegating to json.Encoder because
+// *orderedmap.OrderedMap.MarshalJSON internally calls json.Marshal with HTML
+// escaping ENABLED, so an outer encoder's SetEscapeHTML(false) would NOT reach
+// '<'/'>'/'&' inside nested object string values — defeating the ensure_ascii=
+// False / "ASCII NOT escaped" contract [ref: crusher.rs line 549/577]. The
+// hand-rolled walk keeps those bytes literal at every depth.
 func pythonSafeJSONDumps(v any) string {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	var sb strings.Builder
+	if !compactWrite(&sb, v) {
 		// The compression path only feeds decodeJSON-shaped values here, which
 		// always marshal; a failure is a programmer error, not runtime input.
 		return ""
 	}
-	// json.Encoder.Encode appends a trailing newline; strip it.
-	return strings.TrimRight(buf.String(), "\n")
+	return sb.String()
+}
+
+// compactWrite writes v to sb as compact JSON (no inter-element spaces), with
+// object keys in insertion order and '<'/'>'/'&' left literal (no HTML escaping).
+// It returns false if a value type cannot be serialized. The input must be in the
+// decodeJSON shape: *orderedmap.OrderedMap objects, []any arrays, json.Number
+// numbers, string/bool/nil scalars.
+func compactWrite(sb *strings.Builder, v any) bool {
+	switch t := v.(type) {
+	case *orderedmap.OrderedMap:
+		sb.WriteByte('{')
+		for i, k := range t.Keys() {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			writeJSONStringNoHTML(sb, k)
+			sb.WriteByte(':')
+			val, _ := t.Get(k)
+			if !compactWrite(sb, val) {
+				return false
+			}
+		}
+		sb.WriteByte('}')
+		return true
+	case []any:
+		sb.WriteByte('[')
+		for i, e := range t {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			if !compactWrite(sb, e) {
+				return false
+			}
+		}
+		sb.WriteByte(']')
+		return true
+	case string:
+		writeJSONStringNoHTML(sb, t)
+		return true
+	case bool:
+		if t {
+			sb.WriteString("true")
+		} else {
+			sb.WriteString("false")
+		}
+		return true
+	case nil:
+		sb.WriteString("null")
+		return true
+	case json.Number:
+		sb.WriteString(t.String())
+		return true
+	default:
+		return false
+	}
+}
+
+// writeJSONStringNoHTML writes s as a JSON string literal using encoding/json's
+// scalar escaping with HTML escaping DISABLED, so '<'/'>'/'&' stay literal and
+// non-ASCII is left un-escaped (Go never escapes non-ASCII), matching Python's
+// json.dumps(ensure_ascii=False). A marshal failure is impossible for a Go string.
+func writeJSONStringNoHTML(sb *strings.Builder, s string) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		return
+	}
+	sb.WriteString(strings.TrimRight(buf.String(), "\n"))
 }
 
 // compactSerialize renders a non-string crusher result via the same compact
