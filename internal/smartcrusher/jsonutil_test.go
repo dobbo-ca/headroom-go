@@ -70,3 +70,46 @@ func TestDecodeJSON(t *testing.T) {
 		}
 	})
 }
+
+// TestPythonSafeJSONDumps pins the compact serializer: `,`/`:` separators with
+// NO spaces, ASCII (non-ASCII) NOT escaped, key insertion order preserved
+// [ref: crusher.rs python_safe_json_dumps].
+func TestPythonSafeJSONDumps(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"array no spaces", `[1, 2, 3]`, "[1,2,3]"},
+		{"object compact separators", `{"a": 1, "b": 2}`, `{"a":1,"b":2}`},
+		{"object key order preserved", `{"b": 1, "a": 2}`, `{"b":1,"a":2}`},
+		{"non-ascii not escaped", `{"k": "café"}`, `{"k":"café"}`},
+		{"nested compact", `{"x": [1, {"y": 2}]}`, `{"x":[1,{"y":2}]}`},
+		{"bare string", `"hi"`, `"hi"`},
+		{"bare int", `42`, "42"},
+		{"null", `null`, "null"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v, err := decodeJSON(c.json)
+			if err != nil {
+				t.Fatalf("decodeJSON(%q) error: %v", c.json, err)
+			}
+			if got := pythonSafeJSONDumps(v); got != c.want {
+				t.Errorf("pythonSafeJSONDumps(%s) = %q, want %q", c.json, got, c.want)
+			}
+		})
+	}
+}
+
+// TestCompactSerialize pins compactSerialize: it renders any decoded value via
+// the same compact serializer used for non-string crusher results.
+func TestCompactSerialize(t *testing.T) {
+	v, err := decodeJSON(`[{"b": 1, "a": 2}]`)
+	if err != nil {
+		t.Fatalf("decodeJSON error: %v", err)
+	}
+	if got := compactSerialize(v); got != `[{"b":1,"a":2}]` {
+		t.Errorf("compactSerialize = %q, want %q", got, `[{"b":1,"a":2}]`)
+	}
+}

@@ -1,6 +1,7 @@
 package smartcrusher
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,5 +110,32 @@ func decodeArray(dec *json.Decoder) ([]any, error) {
 	}
 }
 
-// DEFERRED (Task 6): pythonSafeJSONDumps / compactSerialize land with the anchor
-// serialization helpers. Only decodeJSON ships in Task 1.
+// pythonSafeJSONDumps renders v as compact JSON: `,`/`:` separators with NO
+// surrounding spaces, non-ASCII left un-escaped, and object key insertion order
+// preserved [ref: crusher.rs python_safe_json_dumps]. It mirrors Python's
+// json.dumps(separators=(",",":"), ensure_ascii=False). The value must already
+// be in the decodeJSON shape (*orderedmap.OrderedMap objects, []any arrays,
+// json.Number numbers) so key order and numeric literals are preserved.
+//
+// encoding/json already emits compact output with no inter-element spaces and
+// orderedmap.OrderedMap marshals in insertion order, so a single Marshal with
+// HTML escaping disabled satisfies the contract.
+func pythonSafeJSONDumps(v any) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		// The compression path only feeds decodeJSON-shaped values here, which
+		// always marshal; a failure is a programmer error, not runtime input.
+		return ""
+	}
+	// json.Encoder.Encode appends a trailing newline; strip it.
+	return strings.TrimRight(buf.String(), "\n")
+}
+
+// compactSerialize renders a non-string crusher result via the same compact
+// serializer as pythonSafeJSONDumps [ref: crusher.rs]. It is a named alias kept
+// distinct so callers reading the crusher read as "serialize the crushed value".
+func compactSerialize(v any) string {
+	return pythonSafeJSONDumps(v)
+}
