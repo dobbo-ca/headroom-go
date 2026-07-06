@@ -349,7 +349,11 @@ func flattenUniformNested(specs *[]FieldSpec, rows []Row, cfg CompactConfig) {
 					continue
 				}
 				if v, present := innerObj.Get(k); present {
-					expanded[j] = cellFromValue(v, cfg)
+					// Plain scalar clone of the inner value with NO re-classification
+					// [ref: flatten_uniform_nested "else Scalar(clone map[k])"]. Running
+					// cellFromValue here would re-classify (OpaqueRef/Nested/parsed-JSON),
+					// which upstream does NOT do in the flatten pass.
+					expanded[j] = CellScalar{Value: v}
 				} else {
 					expanded[j] = CellMissing{}
 				}

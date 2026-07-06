@@ -256,6 +256,66 @@ func TestCompactDottedFlattenUniform(t *testing.T) {
 	}
 }
 
+func TestCompactFlattenInnerOpaqueStringStaysScalar(t *testing.T) {
+	cfg := DefaultCompactConfig()
+	// Uniform-nested "meta" whose inner "blob" is a BULKY opaque string (>256 bytes,
+	// low diversity, base64/html fail). The flatten pass must promote the inner value
+	// as a PLAIN Scalar clone with NO re-classification [ref: flatten_uniform_nested
+	// "else Scalar(clone map[k])"]. Re-classifying (the old cellFromValue bug) would
+	// emit a CellOpaqueRef and tag the flattened column "json" instead of "string".
+	blob := repeat("ab ", 100) // 300 bytes -> LongString opaque under cellFromValue.
+	src := `[{"id":1,"meta":{"blob":"` + blob + `"}},{"id":2,"meta":{"blob":"` + blob + `"}}]`
+	got := Compact(decodeArr(t, src), cfg)
+	tbl, ok := got.(Table)
+	if !ok {
+		t.Fatalf("Compact = %T, want Table", got)
+	}
+	names := tbl.Schema.FieldNames()
+	bIdx := indexOf(names, "meta.blob")
+	if bIdx < 0 {
+		t.Fatalf("flattened column 'meta.blob' missing; names=%v", names)
+	}
+	// The promoted cell must be a plain Scalar holding the RAW string, NOT an OpaqueRef.
+	if _, isRef := tbl.Rows[0].Cells[bIdx].(CellOpaqueRef); isRef {
+		t.Fatalf("row0 meta.blob = CellOpaqueRef, want CellScalar (no re-classification on flatten)")
+	}
+	if v := scalarValue(t, tbl.Rows[0].Cells[bIdx]); toStr(v) != blob {
+		t.Errorf("row0 meta.blob scalar = %q..., want the raw blob", toStr(v))
+	}
+	// type_tag must be the scalar tag "string", NOT the Nested/OpaqueRef arm's "json".
+	for _, f := range tbl.Schema.Fields {
+		if f.Name == "meta.blob" && f.TypeTag != "string" {
+			t.Errorf("meta.blob TypeTag = %q, want string (scalar tag, not json)", f.TypeTag)
+		}
+	}
+}
+
+func TestCompactFlattenInnerArrayOfObjectsStaysScalar(t *testing.T) {
+	cfg := DefaultCompactConfig()
+	// Uniform-nested "meta" whose inner "items" is an array of >=2 objects. The
+	// flatten pass must promote it as a PLAIN Scalar clone [ref: flatten_uniform_nested
+	// "else Scalar(clone map[k])"]. Re-classifying (the old cellFromValue bug) would
+	// recurse into a CellNested compaction instead of keeping the raw array scalar.
+	src := `[{"id":1,"meta":{"items":[{"k":1},{"k":2}]}},{"id":2,"meta":{"items":[{"k":3},{"k":4}]}}]`
+	got := Compact(decodeArr(t, src), cfg)
+	tbl, ok := got.(Table)
+	if !ok {
+		t.Fatalf("Compact = %T, want Table", got)
+	}
+	names := tbl.Schema.FieldNames()
+	iIdx := indexOf(names, "meta.items")
+	if iIdx < 0 {
+		t.Fatalf("flattened column 'meta.items' missing; names=%v", names)
+	}
+	// The promoted cell must be a plain Scalar (raw array), NOT a recursed CellNested.
+	if _, isNested := tbl.Rows[0].Cells[iIdx].(CellNested); isNested {
+		t.Fatalf("row0 meta.items = CellNested, want CellScalar (no re-classification on flatten)")
+	}
+	if _, ok := tbl.Rows[0].Cells[iIdx].(CellScalar); !ok {
+		t.Fatalf("row0 meta.items = %T, want CellScalar", tbl.Rows[0].Cells[iIdx])
+	}
+}
+
 func TestCompactFlattenDifferentOrderStaysNested(t *testing.T) {
 	cfg := DefaultCompactConfig()
 	// Same key SET but different insertion ORDER -> NON-uniform (ordered slice
