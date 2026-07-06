@@ -1,0 +1,8 @@
+{
+  "name": "short_array_compact_unmodified",
+  "path": "lossy",
+  "content": "[1,2,3]",
+  "wasModified": false,
+  "recordedCompressedLen": 7,
+  "byteExact": true
+}

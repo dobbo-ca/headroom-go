@@ -1,0 +1,10 @@
+{
+  "name": "compact_document_json",
+  "path": "document",
+  "content": "{\n  \"attachment\": \"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODk\",\n  \"events\": [\n    {\"id\": 0, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 1, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 2, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 3, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 4, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 5, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 6, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 7, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 8, \"level\": \"info\", \"msg\": \"ok\"},\n    {\"id\": 9, \"level\": \"info\", \"msg\": \"ok\"}\n  ]\n}",
+  "wasModified": true,
+  "recordedCompressedLen": 240,
+  "assertRoundTrip": true,
+  "blobMarker": true,
+  "subArrayToString": true
+}
