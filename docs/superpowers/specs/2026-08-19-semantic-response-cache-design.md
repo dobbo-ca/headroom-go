@@ -79,11 +79,22 @@ are forwarded unmodified.
 
 ### Storage
 
-Vectors go in the CCR SQLite store, which already holds blobs and already ships
-in the binary. Lookup is a linear cosine scan over stored vectors.
+Split, because `ccr.Store` is `Put`/`Get`/`Len` only (`internal/ccr/store.go`)
+and cannot be iterated. Widening that interface would change a type the
+pipeline and every transform depend on, for one caller's benefit.
 
-> `ponytail:` linear scan, O(n) per request. Fine to a few thousand entries.
-> Upgrade path: an ANN index, or SQLite `vec0` if a pure-Go build exists by then.
+- **Response payloads** go in the CCR store, keyed by `ccr.ComputeKey`. They
+  inherit its TTL and its SQLite persistence for free.
+- **Vectors** live in a bounded in-memory index inside `semcache`, holding
+  `{vector, ccrKey}` pairs. Lookup is a linear cosine scan over that index.
+
+A restart empties the index, so the cache starts cold and warms again. Stored
+payloads outlive the index harmlessly: an entry the index no longer references
+simply expires under the CCR TTL.
+
+> `ponytail:` linear scan, O(n) per request, and the index is memory-only.
+> Fine to a few thousand entries. Upgrade path: an ANN index, or persist
+> vectors once a pure-Go vector store exists.
 
 ## 5. Configuration
 
