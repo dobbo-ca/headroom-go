@@ -31,12 +31,16 @@ func TestFromOptionsAppliesDefaults(t *testing.T) {
 func TestFromOptionsKeepsExplicitValues(t *testing.T) {
 	c := FromOptions(Options{
 		Enabled:    true,
+		Endpoint:   "http://127.0.0.1:9999",
 		Model:      "custom-model",
 		Threshold:  0.5,
 		MaxEntries: 7,
 		Timeout:    time.Second,
 	}, newFakeStore())
 
+	if !c.cfg.Enabled {
+		t.Error("Enabled = false, want true")
+	}
 	if c.cfg.Model != "custom-model" {
 		t.Errorf("Model = %q, want custom-model", c.cfg.Model)
 	}
@@ -45,6 +49,17 @@ func TestFromOptionsKeepsExplicitValues(t *testing.T) {
 	}
 	if c.cfg.MaxEntries != 7 {
 		t.Errorf("MaxEntries = %d, want 7", c.cfg.MaxEntries)
+	}
+
+	cl, ok := c.embed.(*embed.Client)
+	if !ok {
+		t.Fatalf("embedder = %T, want *embed.Client", c.embed)
+	}
+	if cl.Model != "custom-model" {
+		t.Errorf("client Model = %q, want custom-model", cl.Model)
+	}
+	if cl.Endpoint != "http://127.0.0.1:9999" {
+		t.Errorf("client Endpoint = %q, want http://127.0.0.1:9999", cl.Endpoint)
 	}
 }
 
