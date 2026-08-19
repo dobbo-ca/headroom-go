@@ -172,44 +172,26 @@ func TestIndexIsBounded(t *testing.T) {
 	}
 }
 
-func TestModelTagSeparatesPayloadKeys(t *testing.T) {
+func TestPayloadKey(t *testing.T) {
 	// Test payloadKey directly. Going through Lookup would pass for the wrong
-	// reason: two Cache values have two indexes, so the miss proves nothing
+	// reason: two Cache values have two indexes, so a miss proves nothing
 	// about the key.
-	vec := []float32{1, 0}
-
 	cfgA := enabledConfig()
 	cfgA.Model = "model-a"
-	cfgB := enabledConfig()
+	cfgB := cfgA
 	cfgB.Model = "model-b"
 
-	keyA := New(cfgA, nil, newFakeStore()).payloadKey(vec)
-	keyB := New(cfgB, nil, newFakeStore()).payloadKey(vec)
+	keyA := func(vec []float32) string { return New(cfgA, nil, newFakeStore()).payloadKey(vec) }
+	v1, v2 := []float32{1, 0}, []float32{0, 1}
 
-	if keyA == keyB {
-		t.Errorf("payloadKey = %q for both model tags; the tag must separate them", keyA)
+	if keyA(v1) != keyA(v1) {
+		t.Error("payloadKey is not stable for the same model and vector")
 	}
-}
-
-func TestPayloadKeyIsStableForSameModelAndVector(t *testing.T) {
-	cfg := enabledConfig()
-	cfg.Model = "model-a"
-	vec := []float32{1, 0}
-
-	first := New(cfg, nil, newFakeStore()).payloadKey(vec)
-	second := New(cfg, nil, newFakeStore()).payloadKey(vec)
-	if first != second {
-		t.Errorf("payloadKey not stable: %q then %q", first, second)
+	if keyA(v1) == New(cfgB, nil, newFakeStore()).payloadKey(v1) {
+		t.Error("payloadKey ignores the model tag; a model upgrade would serve foreign vectors")
 	}
-}
-
-func TestDifferentVectorsGetDifferentKeys(t *testing.T) {
-	cfg := enabledConfig()
-	cfg.Model = "model-a"
-	c := New(cfg, nil, newFakeStore())
-
-	if a, b := c.payloadKey([]float32{1, 0}), c.payloadKey([]float32{0, 1}); a == b {
-		t.Errorf("payloadKey = %q for two different vectors", a)
+	if keyA(v1) == keyA(v2) {
+		t.Error("payloadKey is equal for two different vectors")
 	}
 }
 

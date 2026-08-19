@@ -19,7 +19,8 @@ const (
 	DefaultTimeout  = 2 * time.Second
 )
 
-// Client calls an Ollama-compatible /api/embeddings endpoint.
+// Client calls an Ollama-compatible /api/embeddings endpoint. HTTP.Timeout is
+// the whole-call budget; the caller's ctx can only shorten it.
 type Client struct {
 	Endpoint string
 	Model    string
@@ -63,9 +64,6 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed: marshal request: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
-	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint+"/api/embeddings", bytes.NewReader(body))
 	if err != nil {

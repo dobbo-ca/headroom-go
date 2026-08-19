@@ -26,7 +26,3 @@ func Cosine(a, b []float32) float32 {
 	}
 	return float32(dot / (math.Sqrt(na) * math.Sqrt(nb)))
 }
-
-// float32bits is math.Float32bits, named locally so cache.go does not import
-// math just for one conversion.
-func float32bits(f float32) uint32 { return math.Float32bits(f) }

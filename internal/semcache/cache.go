@@ -2,6 +2,8 @@ package semcache
 
 import (
 	"context"
+	"encoding/binary"
+	"math"
 	"sync"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
@@ -119,8 +121,7 @@ func (c *Cache) payloadKey(vec []float32) string {
 	h = append(h, c.cfg.Model...)
 	h = append(h, 0)
 	for _, f := range vec {
-		b := float32bits(f)
-		h = append(h, byte(b), byte(b>>8), byte(b>>16), byte(b>>24))
+		h = binary.LittleEndian.AppendUint32(h, math.Float32bits(f))
 	}
 	return ccr.ComputeKey(h)
 }
