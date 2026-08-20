@@ -1,0 +1,37 @@
+// Command headroom is the single multi-command CLI for the headroom
+// compression layer. v0.1 ships "mcp serve" and --version; proxy, wrap, perf,
+// and learn arrive in v0.2.
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+// version is stamped at build time with -ldflags "-X main.version=<tag>".
+var version = "0.1.0-dev"
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "headroom",
+		Short:         "Compress LLM context before it reaches the model",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	// "mcp serve" owns stdout for the protocol stream, so every diagnostic
+	// cobra emits has to go to stderr instead.
+	root.SetOut(os.Stderr)
+	root.SetErr(os.Stderr)
+	root.AddCommand(newMCPCmd())
+	return root
+}
+
+func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "headroom:", err)
+		os.Exit(1)
+	}
+}
