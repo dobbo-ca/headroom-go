@@ -158,3 +158,30 @@ func TestBackendConfigMapsToCCR(t *testing.T) {
 		t.Errorf("memory BackendConfig() = %+v, want InMemory with capacity 5", got)
 	}
 }
+
+func TestCCRPathAndModelHonourEnvThenFlag(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("HEADROOM_HOME", t.TempDir())
+	t.Setenv("HEADROOM_CCR_PATH", "/tmp/from-env.db")
+	t.Setenv("HEADROOM_MODEL", "gpt-4o")
+
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error: %v", err)
+	}
+	if c.CCRPath != "/tmp/from-env.db" {
+		t.Errorf("CCRPath = %q, want the env value", c.CCRPath)
+	}
+
+	path := "/tmp/from-flag.db"
+	model := "claude"
+	if c, err = Load(Overrides{CCRPath: &path, Model: &model}); err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.CCRPath != "/tmp/from-flag.db" {
+		t.Errorf("CCRPath = %q, want the flag value", c.CCRPath)
+	}
+	if c.Model != "claude" {
+		t.Errorf("Model = %q, want claude (flag wins over env)", c.Model)
+	}
+}
