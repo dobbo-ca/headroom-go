@@ -3,6 +3,7 @@ package compress
 import (
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -61,6 +62,30 @@ func fileFromHeader(line string) (string, bool) {
 	return "", false
 }
 
+// hunkLineCount parses one side of a "@@ -a,b +c,d @@" range (the "-a,b" or
+// "+c,d" field) and returns its line count. A count omitted from the range
+// (e.g. "-1" instead of "-1,1") means 1 line, per the unified diff format.
+// Anything unparseable also yields 1, so a malformed header can't wedge the
+// hunk open forever.
+func hunkLineCount(field string) int {
+	field = strings.TrimPrefix(strings.TrimPrefix(field, "-"), "+")
+	if _, count, ok := strings.Cut(field, ","); ok {
+		if n, err := strconv.Atoi(count); err == nil {
+			return n
+		}
+	}
+	return 1
+}
+
+// hunkCounts parses the old/new line counts from a "@@ -a,b +c,d @@" header.
+func hunkCounts(line string) (oldCount, newCount int) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return 1, 1
+	}
+	return hunkLineCount(fields[1]), hunkLineCount(fields[2])
+}
+
 // parseDiff splits a unified diff into the text before the first file header
 // and one hunk per @@ block. Input that is not a diff yields no hunks, which
 // the caller treats as "nothing to do".
@@ -74,6 +99,7 @@ func parseDiff(s string) ([]string, []hunk) {
 	var hunks []hunk
 	var pending []string // file-header lines seen since the last hunk
 	var current *hunk
+	var oldRemaining, newRemaining int // body lines still owed to the open hunk
 	file := ""
 	started := false
 
@@ -86,12 +112,13 @@ func parseDiff(s string) ([]string, []hunk) {
 
 	for _, line := range lines {
 		switch {
-		// File-header prefixes only count outside a hunk body, where a
-		// deleted line (e.g. "-- old comment" -> "--- old comment") could
-		// otherwise false-positive as a "---" file marker and truncate the
-		// hunk. "diff --git " is the one exception: it starts a new file
-		// section unconditionally, and a deleted line can never render as
-		// "diff --git ..." (it would render as "-diff --git ...").
+		// File-header prefixes only count outside a hunk body (current ==
+		// nil, i.e. the hunk's @@ line counts have already been satisfied),
+		// where a deleted line (e.g. "-- old comment" -> "--- old comment")
+		// could otherwise false-positive as a "---" file marker and truncate
+		// the hunk early. "diff --git " is the one exception: it starts a
+		// new file section unconditionally, and a deleted line can never
+		// render as "diff --git ..." (it would render as "-diff --git ...").
 		case (current == nil && isFileHeader(line)), strings.HasPrefix(line, "diff --git "):
 			flush()
 			started = true
@@ -103,12 +130,27 @@ func parseDiff(s string) ([]string, []hunk) {
 		case strings.HasPrefix(line, "@@"):
 			flush()
 			started = true
+			oldRemaining, newRemaining = hunkCounts(line)
 			current = &hunk{file: file, header: pending, body: []string{line}}
 			pending = nil
 
 		default:
 			if current != nil {
 				current.body = append(current.body, line)
+				switch {
+				case strings.HasPrefix(line, "-"):
+					oldRemaining--
+				case strings.HasPrefix(line, "+"):
+					newRemaining--
+				case strings.HasPrefix(line, "\\"):
+					// "\ No newline at end of file" consumes neither side.
+				default:
+					oldRemaining--
+					newRemaining--
+				}
+				if oldRemaining <= 0 && newRemaining <= 0 {
+					flush()
+				}
 			} else if started {
 				pending = append(pending, line)
 			} else {

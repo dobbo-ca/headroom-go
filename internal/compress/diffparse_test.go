@@ -136,6 +136,24 @@ func TestParseDiffDoesNotAttributeFileFromDevNull(t *testing.T) {
 	}
 }
 
+func TestParseDiffClosesHunkOnLineCountInPlainMultiFileDiff(t *testing.T) {
+	// Plain "diff -u" concatenated over two files has no "diff --git" line
+	// to close the first file's hunk, so the parser must close it once the
+	// @@ header's line counts are satisfied. Otherwise the second file's
+	// "--- "/"+++ " markers and hunk get folded into the first file's body.
+	in := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n--- a/go.sum\n+++ b/go.sum\n@@ -1 +1 @@\n-a\n+b"
+	_, hunks := parseDiff(in)
+	if len(hunks) != 2 {
+		t.Fatalf("got %d hunks, want 2", len(hunks))
+	}
+	if hunks[0].file != "x" {
+		t.Errorf("hunks[0].file = %q, want x", hunks[0].file)
+	}
+	if hunks[1].file != "go.sum" {
+		t.Errorf("hunks[1].file = %q, want go.sum", hunks[1].file)
+	}
+}
+
 func TestIsLockfileMatchesKnownNames(t *testing.T) {
 	for _, p := range []string{
 		"go.sum", "vendor/go.sum", "package-lock.json", "a/b/yarn.lock",
