@@ -97,9 +97,11 @@ stages, not six, is a deliberate divergence from line 238.
    first line followed by a repeat count on its own line. A run of one is
    untouched.
 3. **Warning dedup.** A line is a warning when it contains `warning:` or
-   `WARN`, case-insensitively. Group by the text after that marker. Keep the
-   first occurrence; replace the rest with a single count line. Order of first
-   occurrences is preserved, so the result is deterministic.
+   `warn:`, matched case-insensitively on the marker only. Group by the text
+   after that marker, which keeps its original case so distinct warnings stay
+   distinct. Keep the first occurrence in place, drop the repeats, and append
+   one summary line at the end. The summary goes at the end rather than in
+   place so removing a repeat never shifts an unrelated line.
 4. **Progress lines.** Drop any line containing a carriage return that is not
    the line terminator — that is output a terminal would have overwritten.
 5. **Middle offload.** Above a line-count threshold, keep the first N and last
