@@ -56,15 +56,22 @@ func TestJsonMinifierDoesNotEscapeHTML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
 	}
-	if !strings.Contains(out.Output, `<`) {
-		t.Errorf("Output %q escaped HTML; SetEscapeHTML(false) not applied", out.Output)
+	// Assert the exact minified output, not just the presence of "<": if
+	// SetEscapeHTML(false) is deleted the escaped encoding is longer than
+	// the input, so the never-inflate guard would return the raw
+	// (unminified but unescaped) input and a substring check would miss it.
+	if want := `{"k":"a<b>c&d"}`; out.Output != want {
+		t.Errorf("Output = %q, want %q", out.Output, want)
 	}
 }
 
 func TestJsonMinifierNeverInflates(t *testing.T) {
-	// Already minimal: re-encoding cannot be shorter, so the input comes back
-	// with BytesSaved 0.
-	in := `[1,2,3]`
+	// A literal U+2028 inside a string re-encodes as the 6-byte
+	// escape, so the encoded form is strictly longer than the input. This
+	// is what actually exercises the len(out) >= len(content) guard; an
+	// already-minimal input like [1,2,3] re-encodes byte-identically and
+	// would pass even if the guard were deleted.
+	in := "[\" \"]"
 	out, err := (JsonMinifier{}).Apply(in)
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
@@ -84,13 +91,34 @@ func TestJsonMinifierRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestJsonMinifierRejectsTrailingContent(t *testing.T) {
+	// json.Decoder.Decode only consumes the first JSON value; without an
+	// explicit dec.More() check, trailing bytes after that value are
+	// silently discarded, which would be data loss for a lossless
+	// transform with no CCR backing.
+	for _, in := range []string{
+		`{"a":1}   and then some prose the model wrote`,
+		`[1,2,3]xyz`,
+	} {
+		_, err := (JsonMinifier{}).Apply(in)
+		if !errors.Is(err, transform.ErrInvalidInput) {
+			t.Errorf("Apply(%q) err = %v, want ErrInvalidInput", in, err)
+		}
+	}
+}
+
 func TestJsonMinifierIsDeterministic(t *testing.T) {
 	// Map key order must not vary between runs. encoding/json sorts map keys,
-	// which is what makes this hold.
-	in := `{"z":1,"a":2,"m":3,"b":4,"y":5}`
+	// which is what makes this hold. The input has whitespace so the
+	// re-encoded form is what gets compared, not the never-inflate guard's
+	// verbatim passthrough.
+	in := `{"z": 1, "a": 2, "m": 3, "b": 4, "y": 5}`
 	first, err := (JsonMinifier{}).Apply(in)
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
+	}
+	if first.BytesSaved <= 0 {
+		t.Fatalf("BytesSaved = %d, want > 0 so the encoded path (not the never-inflate guard) is what's compared", first.BytesSaved)
 	}
 	for i := 0; i < 20; i++ {
 		next, err := (JsonMinifier{}).Apply(in)
@@ -106,5 +134,32 @@ func TestJsonMinifierIsDeterministic(t *testing.T) {
 func TestJsonMinifierEmptyInputIsInvalid(t *testing.T) {
 	if _, err := (JsonMinifier{}).Apply(""); !errors.Is(err, transform.ErrInvalidInput) {
 		t.Errorf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestJsonMinifierNeverPanics(t *testing.T) {
+	malformed := []string{
+		"",
+		"{",
+		"\x00\xff\xfe",
+		`"\ud800"`,
+		"1e99999999",
+		"\xc3\x28", // invalid UTF-8
+	}
+	for _, in := range malformed {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Apply(%q) panicked: %v", in, r)
+				}
+			}()
+			_, err := (JsonMinifier{}).Apply(in)
+			if err == nil {
+				return
+			}
+			if !errors.Is(err, transform.ErrInvalidInput) && !errors.Is(err, transform.ErrInternal) {
+				t.Errorf("Apply(%q) err = %v, want a transform sentinel error", in, err)
+			}
+		}()
 	}
 }
