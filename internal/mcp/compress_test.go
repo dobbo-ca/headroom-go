@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,5 +218,68 @@ func TestCompressEmitsEmptyListsNotNull(t *testing.T) {
 	raw := resultText(t, callTool(t, s, "headroom_compress", map[string]any{"content": "hi"}))
 	if strings.Contains(raw, "null") {
 		t.Errorf("result contains null: %s", raw)
+	}
+}
+
+func TestCompressHashIsTheContentAddressOfTheOriginal(t *testing.T) {
+	s, _ := newTestServer(t)
+	input := bloatedJSON()
+	out := decodeCompress(t, callTool(t, s, "headroom_compress", map[string]any{"content": input}))
+	if want := ccr.ComputeKey([]byte(input)); out.Hash != want {
+		t.Errorf("hash = %q, want the content address of the original %q", out.Hash, want)
+	}
+}
+
+func TestCompressCountersMove(t *testing.T) {
+	s, _ := newTestServer(t)
+	input := bloatedJSON()
+	callTool(t, s, "headroom_compress", map[string]any{"content": input})
+
+	s.mu.Lock()
+	got := s.stats
+	s.mu.Unlock()
+
+	if got.CompressCalls != 1 {
+		t.Errorf("compress_calls = %d, want 1", got.CompressCalls)
+	}
+	if got.BytesIn != int64(len(input)) {
+		t.Errorf("bytes_in = %d, want %d", got.BytesIn, len(input))
+	}
+	if got.BytesOut <= 0 || got.BytesOut >= got.BytesIn {
+		t.Errorf("bytes_out = %d, want between 0 and %d", got.BytesOut, got.BytesIn)
+	}
+	if got.BytesSaved <= 0 {
+		t.Errorf("bytes_saved = %d, want > 0", got.BytesSaved)
+	}
+	if got.TokensIn <= 0 || got.TokensOut <= 0 || got.TokensOut >= got.TokensIn {
+		t.Errorf("tokens_in = %d, tokens_out = %d", got.TokensIn, got.TokensOut)
+	}
+}
+
+func TestCompressCountersAreRaceFree(t *testing.T) {
+	s, _ := newTestServer(t)
+	input := bloatedJSON()
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			var req mcpgo.CallToolRequest
+			req.Params.Name = "headroom_compress"
+			req.Params.Arguments = map[string]any{"content": input}
+			if _, err := s.handleCompress(context.Background(), req); err != nil {
+				t.Errorf("handleCompress: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	s.mu.Lock()
+	got := s.stats.CompressCalls
+	s.mu.Unlock()
+	if got != n {
+		t.Errorf("compress_calls = %d, want %d", got, n)
 	}
 }
