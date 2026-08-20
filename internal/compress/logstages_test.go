@@ -69,6 +69,32 @@ func TestDedupWarningsIsCaseInsensitiveOnTheMarker(t *testing.T) {
 	}
 }
 
+func TestDedupWarningsCountsMultipleDistinctDuplicates(t *testing.T) {
+	in := "warning: a\nwarning: b\nwarning: a\nwarning: b\nwarning: c"
+	got := dedupWarnings(in)
+	if want := "warning: a\nwarning: b\nwarning: c\n... 2 more occurrences of 2 duplicated warning"; got != want {
+		t.Errorf("dedupWarnings = %q, want %q", got, want)
+	}
+}
+
+func TestDedupWarningsMatchesWarnMarker(t *testing.T) {
+	in := "warn: dup\nwarn: dup"
+	got := dedupWarnings(in)
+	if want := "warn: dup\n... 1 more occurrences of 1 duplicated warning"; got != want {
+		t.Errorf("dedupWarnings = %q, want %q", got, want)
+	}
+}
+
+func TestDedupWarningsHandlesNonASCIIBeforeMarker(t *testing.T) {
+	// \x89 is invalid UTF-8; strings.ToLower would expand it to a
+	// multi-byte replacement and desync the marker index from the
+	// original line, which used to panic on a slice out of range.
+	in := "\x89wArn: dup"
+	if got := dedupWarnings(in); got != in {
+		t.Errorf("dedupWarnings = %q, want unchanged %q", got, in)
+	}
+}
+
 func TestDedupWarningsIgnoresNonWarningLines(t *testing.T) {
 	in := "same\nsame\nsame"
 	if got := dedupWarnings(in); got != in {

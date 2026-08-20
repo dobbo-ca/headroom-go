@@ -59,11 +59,25 @@ func collapseRuns(s string) string {
 	return strings.Join(out, "\n")
 }
 
+// asciiLower lowercases ASCII letters only. It is length-preserving byte for
+// byte, unlike strings.ToLower, so indexes found in the result stay valid
+// against the original string even when that string holds invalid UTF-8 or
+// non-ASCII bytes.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
+}
+
 // warningBody returns the text after a warning marker, and whether the line is
 // a warning at all. Matching is case-insensitive on the marker only; the body
 // keeps its original case so distinct warnings stay distinct.
 func warningBody(line string) (string, bool) {
-	lower := strings.ToLower(line)
+	lower := asciiLower(line)
 	for _, marker := range []string{"warning:", "warn:"} {
 		if i := strings.Index(lower, marker); i >= 0 {
 			return strings.TrimSpace(line[i+len(marker):]), true
