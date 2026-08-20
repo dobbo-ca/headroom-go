@@ -143,14 +143,21 @@ parsing hunk bodies.
 
 ## 7. Configuration
 
-New keys under the existing `pipeline.toml`, each with a default. No new file.
+**Not in `pipeline.toml`.** `pipeline.Config` holds the three orchestrator
+gating thresholds and nothing else. Adding compressor knobs there would make
+the orchestrator know about every compressor that exists, and every new
+compressor would widen a struct the pipeline tests already depend on.
 
-| Key | Default | Used by |
-|---|---|---|
-| `log_head_lines` | `50` | LogCompressor stage 5 |
-| `log_tail_lines` | `50` | LogCompressor stage 5 |
-| `log_offload_min_lines` | `200` | LogCompressor stage 5 threshold |
-| `diff_max_hunks` | `40` | DiffCompressor cap |
+Each compressor owns its own config struct with a `DefaultXConfig()`
+constructor, and the caller that registers it passes one. The app-level config
+package (v0.1 item 11, a later plan) is where these get read from disk.
+
+| Compressor | Field | Default | Used by |
+|---|---|---|---|
+| LogCompressor | `HeadLines` | `50` | stage 5 |
+| LogCompressor | `TailLines` | `50` | stage 5 |
+| LogCompressor | `MinLinesToOffload` | `200` | stage 5 threshold |
+| DiffCompressor | `MaxHunks` | `40` | cap |
 
 ## 8. Testing
 
