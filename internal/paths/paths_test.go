@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -64,6 +65,11 @@ func TestEnsureDirCreatesNestedDirAndIsIdempotent(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("EnsureDir(%q) did not create a directory", target)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Errorf("EnsureDir(%q) mode = %#o, want 0700: CCR payloads must stay owner-only", target, perm)
+		}
 	}
 	if err := EnsureDir(target); err != nil {
 		t.Errorf("second EnsureDir() error: %v", err)
