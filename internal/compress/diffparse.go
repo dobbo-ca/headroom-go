@@ -2,7 +2,7 @@ package compress
 
 import (
 	"path"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -32,15 +32,17 @@ var lockfiles = map[string]bool{
 func isLockfile(p string) bool { return lockfiles[path.Base(p)] }
 
 // isFileHeader reports whether a line introduces a file rather than content.
+// It covers only the markers that are conditional on being outside a hunk;
+// "diff --git " is unconditional and is matched by parseDiff directly.
+//
+// The other header lines git emits ("index ", "new file mode ", "rename to ",
+// "Binary files ...") are deliberately absent. They can only reach the parser
+// after a "diff --git " has already set started, where the default branch
+// appends them to pending — the same place this branch would put them. They
+// were listed here once and changed nothing.
 func isFileHeader(line string) bool {
-	return strings.HasPrefix(line, "diff --git ") ||
-		strings.HasPrefix(line, "index ") ||
-		strings.HasPrefix(line, "--- ") ||
-		strings.HasPrefix(line, "+++ ") ||
-		strings.HasPrefix(line, "new file mode ") ||
-		strings.HasPrefix(line, "deleted file mode ") ||
-		strings.HasPrefix(line, "similarity index ") ||
-		strings.HasPrefix(line, "rename ")
+	return strings.HasPrefix(line, "--- ") ||
+		strings.HasPrefix(line, "+++ ")
 }
 
 // fileFromHeader pulls a path out of a "diff --git a/x b/x" or "+++ b/x" line.
@@ -68,7 +70,6 @@ func fileFromHeader(line string) (string, bool) {
 // Anything unparseable also yields 1, so a malformed header can't wedge the
 // hunk open forever.
 func hunkLineCount(field string) int {
-	field = strings.TrimPrefix(strings.TrimPrefix(field, "-"), "+")
 	if _, count, ok := strings.Cut(field, ","); ok {
 		if n, err := strconv.Atoi(count); err == nil {
 			return n
@@ -165,20 +166,10 @@ func parseDiff(s string) ([]string, []hunk) {
 	// instead of being dropped on the floor. A trailing newline in the
 	// input instead leaves a single blank line in pending, which is not a
 	// real header section and must not become a phantom hunk.
-	if hasNonBlankLine(pending) {
+	if slices.ContainsFunc(pending, func(l string) bool { return strings.TrimSpace(l) != "" }) {
 		hunks = append(hunks, hunk{file: file, header: pending})
 	}
 	return preamble, hunks
-}
-
-// hasNonBlankLine reports whether any line holds non-whitespace content.
-func hasNonBlankLine(lines []string) bool {
-	for _, line := range lines {
-		if strings.TrimSpace(line) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // contentLines splits a hunk body into its added and removed content,
@@ -223,8 +214,8 @@ func isWhitespaceOnly(h hunk) bool {
 		a[i] = stripAllWhitespace(added[i])
 		r[i] = stripAllWhitespace(removed[i])
 	}
-	sort.Strings(a)
-	sort.Strings(r)
+	slices.Sort(a)
+	slices.Sort(r)
 	for i := range a {
 		if a[i] != r[i] {
 			return false

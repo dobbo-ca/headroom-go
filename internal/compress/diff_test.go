@@ -231,7 +231,3 @@ func TestDiffCompressorConfidenceIsInRange(t *testing.T) {
 		t.Errorf("Confidence = %v, want a value in (0, 1]", got)
 	}
 }
-
-func TestDiffCompressorSatisfiesTheInterface(t *testing.T) {
-	var _ transform.OffloadTransform = NewDiffCompressor(DefaultDiffConfig())
-}

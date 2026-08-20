@@ -25,10 +25,9 @@ type DiffCompressor struct{ cfg DiffConfig }
 // NewDiffCompressor builds a DiffCompressor. A non-positive MaxHunks falls
 // back to the default, so a partly-filled config cannot drop every hunk.
 func NewDiffCompressor(cfg DiffConfig) *DiffCompressor {
-	if cfg.MaxHunks <= 0 {
-		cfg.MaxHunks = DefaultDiffConfig().MaxHunks
-	}
-	return &DiffCompressor{cfg: cfg}
+	return &DiffCompressor{cfg: DiffConfig{
+		MaxHunks: positiveOr(cfg.MaxHunks, DefaultDiffConfig().MaxHunks),
+	}}
 }
 
 func (c *DiffCompressor) Name() string { return "diff_compressor" }

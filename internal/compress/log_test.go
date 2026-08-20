@@ -23,7 +23,11 @@ func (s *mapStore) Get(hash string) (string, bool) {
 }
 func (s *mapStore) Len() int { return len(s.m) }
 
-var _ ccr.Store = (*mapStore)(nil)
+var (
+	_ ccr.Store                  = (*mapStore)(nil)
+	_ transform.OffloadTransform = (*LogCompressor)(nil)
+	_ transform.OffloadTransform = (*DiffCompressor)(nil)
+)
 
 // manyLines builds n distinct numbered lines, so no stage other than the
 // middle offload can shorten it.
@@ -209,8 +213,4 @@ func TestLogCompressorConfidenceIsInRange(t *testing.T) {
 	if got <= 0 || got > 1 {
 		t.Errorf("Confidence = %v, want a value in (0, 1]", got)
 	}
-}
-
-func TestLogCompressorSatisfiesTheInterface(t *testing.T) {
-	var _ transform.OffloadTransform = NewLogCompressor(DefaultLogConfig())
 }

@@ -120,6 +120,24 @@ func TestParseDiffAttributesFileFromPlusPlusPlusWithoutDiffGitLine(t *testing.T)
 	}
 }
 
+func TestParseDiffAttachesMinusMinusMinusMarkerToItsHunk(t *testing.T) {
+	// In plain "diff -u" output the "--- a/x" marker is the first line, so
+	// it is what starts the file section. If it were not treated as a file
+	// header it would fall into the preamble, which is always kept, and
+	// would outlive the hunk it introduces when that hunk is dropped.
+	in := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new"
+	preamble, hunks := parseDiff(in)
+	if len(preamble) != 0 {
+		t.Errorf("preamble = %v, want empty; the --- marker belongs to the hunk", preamble)
+	}
+	if len(hunks) != 1 {
+		t.Fatalf("got %d hunks, want 1", len(hunks))
+	}
+	if got := strings.Join(hunks[0].header, "\n"); !strings.Contains(got, "--- a/x") {
+		t.Errorf("hunk header = %q, want it to carry the --- marker", got)
+	}
+}
+
 func TestParseDiffDoesNotAttributeFileFromDevNull(t *testing.T) {
 	// A deleted file's "+++" line points at /dev/null; that must not
 	// become the file name.
@@ -168,16 +186,16 @@ func TestParseDiffPreservesTrailingFileSectionWithoutHunk(t *testing.T) {
 	}
 }
 
-func TestParseDiffTrailingNewlineDoesNotAddAPhantomHunk(t *testing.T) {
-	// A trailing "\n" (the norm for real `git diff` output) leaves one
-	// blank line in pending after the last real hunk closes. That blank
-	// line must not turn into its own headers-only hunk.
-	withoutTrailing := twoFileDiff
-	withTrailing := twoFileDiff + "\n"
-	_, hunksWithout := parseDiff(withoutTrailing)
-	_, hunksWith := parseDiff(withTrailing)
-	if len(hunksWith) != len(hunksWithout) {
-		t.Fatalf("got %d hunks with a trailing newline, want %d (same as without)", len(hunksWith), len(hunksWithout))
+func TestParseDiffTrailingBlankLinesDoNotAddAPhantomHunk(t *testing.T) {
+	// Once the last hunk closes on its @@ line counts, trailing blank lines
+	// land in pending with no header content. They must not become their
+	// own headers-only hunk. The hunk here closes exactly on "+b", so the
+	// two trailing newlines reach pending as blanks rather than being
+	// absorbed as context lines.
+	in := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\n"
+	_, hunks := parseDiff(in)
+	if len(hunks) != 1 {
+		t.Fatalf("got %d hunks, want 1: trailing blank lines became a phantom hunk", len(hunks))
 	}
 }
 

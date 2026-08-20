@@ -28,20 +28,26 @@ func DefaultLogConfig() LogConfig {
 // stashes the original in the CCR store so every drop stays recoverable.
 type LogCompressor struct{ cfg LogConfig }
 
+// positiveOr returns v when it is positive, else the default d. Both
+// compressors use it so a partly-filled config cannot leave a zero or
+// negative knob behind — a negative HeadLines would panic offloadMiddle's
+// slice. cmp.Or is not enough: it only falls back on zero.
+func positiveOr(v, d int) int {
+	if v > 0 {
+		return v
+	}
+	return d
+}
+
 // NewLogCompressor builds a LogCompressor. Any non-positive field falls back
 // to its default, so a partly-filled config cannot produce a zero head or tail.
 func NewLogCompressor(cfg LogConfig) *LogCompressor {
 	d := DefaultLogConfig()
-	if cfg.HeadLines <= 0 {
-		cfg.HeadLines = d.HeadLines
-	}
-	if cfg.TailLines <= 0 {
-		cfg.TailLines = d.TailLines
-	}
-	if cfg.MinLinesToOffload <= 0 {
-		cfg.MinLinesToOffload = d.MinLinesToOffload
-	}
-	return &LogCompressor{cfg: cfg}
+	return &LogCompressor{cfg: LogConfig{
+		HeadLines:         positiveOr(cfg.HeadLines, d.HeadLines),
+		TailLines:         positiveOr(cfg.TailLines, d.TailLines),
+		MinLinesToOffload: positiveOr(cfg.MinLinesToOffload, d.MinLinesToOffload),
+	}}
 }
 
 func (c *LogCompressor) Name() string { return "log_compressor" }
