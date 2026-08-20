@@ -159,6 +159,13 @@ func parseDiff(s string) ([]string, []hunk) {
 		}
 	}
 	flush()
+	// A file section with no @@ block (binary files, mode-only changes,
+	// empty file creation) leaves its header lines in pending with no hunk
+	// to carry them. Wrap them in a headers-only hunk so they survive
+	// instead of being dropped on the floor.
+	if len(pending) > 0 {
+		hunks = append(hunks, hunk{file: file, header: pending})
+	}
 	return preamble, hunks
 }
 

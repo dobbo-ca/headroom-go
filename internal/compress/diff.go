@@ -87,15 +87,20 @@ func (c *DiffCompressor) Apply(content string, _ transform.CompressionContext, s
 		out = append(out, h.body...)
 	}
 
-	if dropped > 0 {
-		out = append(out, fmt.Sprintf("... %d hunk(s) dropped as noise or over the cap", dropped))
-		out = append(out, ccr.MarkerFor(key))
-	}
-
 	joined := strings.Join(out, "\n")
 	if len(joined) >= len(content) {
 		return transform.OffloadOutput{Output: content, BytesSaved: 0}, nil
 	}
+
+	// The output is lossy (something was left out), so it must carry an
+	// in-band marker pointing at the recoverable original regardless of
+	// what was dropped — gating this on hunk count alone missed lossy
+	// output caused by other omissions.
+	if dropped > 0 {
+		out = append(out, fmt.Sprintf("... %d hunk(s) dropped as noise or over the cap", dropped))
+	}
+	out = append(out, ccr.MarkerFor(key))
+	joined = strings.Join(out, "\n")
 
 	store.Put(key, content)
 	return transform.OffloadOutput{

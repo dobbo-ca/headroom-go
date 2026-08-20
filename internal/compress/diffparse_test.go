@@ -154,6 +154,20 @@ func TestParseDiffClosesHunkOnLineCountInPlainMultiFileDiff(t *testing.T) {
 	}
 }
 
+func TestParseDiffPreservesTrailingFileSectionWithoutHunk(t *testing.T) {
+	// A binary-file diff has no @@ block; its header lines must not be
+	// silently dropped when it's the last section in the input.
+	in := twoFileDiff + "\ndiff --git a/img.png b/img.png\nindex 555..666 100644\nBinary files a/img.png and b/img.png differ"
+	_, hunks := parseDiff(in)
+	if len(hunks) != 3 {
+		t.Fatalf("got %d hunks, want 3 (including the trailing header-only section)", len(hunks))
+	}
+	joined := strings.Join(hunks[2].header, "\n")
+	if !strings.Contains(joined, "Binary files a/img.png and b/img.png differ") {
+		t.Errorf("trailing hunk header = %q, want the binary-file section", joined)
+	}
+}
+
 func TestIsLockfileMatchesKnownNames(t *testing.T) {
 	for _, p := range []string{
 		"go.sum", "vendor/go.sum", "package-lock.json", "a/b/yarn.lock",

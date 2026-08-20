@@ -88,6 +88,30 @@ func TestDiffCompressorOutputCarriesTheMarker(t *testing.T) {
 	}
 }
 
+func TestDiffCompressorPreservesTrailingHeaderOnlySection(t *testing.T) {
+	// A file section with no @@ block (binary diff, mode-only change, empty
+	// file creation) must not vanish from the output. Pair it with a
+	// dropped lockfile hunk so the run is genuinely lossy and must carry
+	// the CCR marker in-band. TestDiffCompressorOutputCarriesTheMarker
+	// alone would not catch a marker regression here: twoFileDiff has no
+	// trailing header-only section to lose.
+	in := twoFileDiff + "\ndiff --git a/img.png b/img.png\nindex 555..666 100644\nBinary files a/img.png and b/img.png differ"
+	out, err := NewDiffCompressor(DefaultDiffConfig()).
+		Apply(in, transform.CompressionContext{}, newMapStore())
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if !strings.Contains(out.Output, "Binary files a/img.png and b/img.png differ") {
+		t.Error("output lost the trailing binary-file section")
+	}
+	if out.BytesSaved <= 0 {
+		t.Fatal("BytesSaved <= 0, want the dropped lockfile hunk to make this lossy")
+	}
+	if !strings.Contains(out.Output, ccr.MarkerFor(out.CacheKey)) {
+		t.Error("lossy output does not carry the CCR marker for its own key")
+	}
+}
+
 func TestDiffCompressorCapsHunkCount(t *testing.T) {
 	in := manyHunks(100)
 	cfg := DiffConfig{MaxHunks: 5}
