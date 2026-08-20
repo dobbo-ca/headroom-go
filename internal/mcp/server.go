@@ -7,9 +7,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
 	"sync"
-	"time"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/router"
@@ -19,12 +17,11 @@ import (
 
 // Deps are the collaborators the tool handlers need.
 type Deps struct {
-	Router     *router.Router
-	Store      ccr.Store
-	Tokenizer  tokenizer.Tokenizer
-	ProxyURL   string
-	HTTPClient *http.Client
-	Version    string
+	Router    *router.Router
+	Store     ccr.Store
+	Tokenizer tokenizer.Tokenizer
+	ProxyURL  string
+	Version   string
 }
 
 // Stats are session-scoped counters. They carry no timestamps, so a stats
@@ -53,12 +50,6 @@ type Server struct {
 
 // NewServer builds the MCP server and registers headroom's tools.
 func NewServer(d Deps) *Server {
-	if d.Version == "" {
-		d.Version = "dev"
-	}
-	if d.HTTPClient == nil {
-		d.HTTPClient = &http.Client{Timeout: 5 * time.Second}
-	}
 	s := &Server{
 		deps: d,
 		mcp:  server.NewMCPServer("headroom", d.Version, server.WithToolCapabilities(false)),

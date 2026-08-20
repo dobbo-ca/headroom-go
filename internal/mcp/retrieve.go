@@ -7,12 +7,17 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // hashRe matches a ccr.ComputeKey output: 24 lowercase hex characters.
 var hashRe = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
+// proxyClient talks to the local headroom proxy; the timeout bounds a retrieve
+// when the proxy is up but wedged.
+var proxyClient = &http.Client{Timeout: 5 * time.Second}
 
 type retrieveResult struct {
 	Found   bool   `json:"found"`
@@ -74,7 +79,7 @@ func (s *Server) fetchFromProxy(ctx context.Context, hash string) (string, bool)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.deps.HTTPClient.Do(req)
+	resp, err := proxyClient.Do(req)
 	if err != nil {
 		return "", false
 	}

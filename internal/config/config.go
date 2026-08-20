@@ -15,10 +15,10 @@ import (
 
 // Defaults. The 3600s CCR lifetime is the spec's fixed value for the MCP path.
 const (
-	defaultBackend  = "sqlite"
-	defaultTTL      = 3600 * time.Second
-	defaultProxyURL = "http://127.0.0.1:8787"
-	defaultModel    = "claude"
+	defaultBackend    = "sqlite"
+	defaultTTLSeconds = 3600
+	defaultProxyURL   = "http://127.0.0.1:8787"
+	defaultModel      = "claude"
 )
 
 // Config is the resolved runtime configuration.
@@ -31,13 +31,13 @@ type Config struct {
 	Model       string
 }
 
-// Overrides carries command-line values. A nil field means the flag was not
+// Overrides carries command-line values. An empty field means the flag was not
 // set, so the environment variable or the default wins for that field.
 type Overrides struct {
-	CCRBackend *string
-	CCRPath    *string
-	ProxyURL   *string
-	Model      *string
+	CCRBackend string
+	CCRPath    string
+	ProxyURL   string
+	Model      string
 }
 
 // FromEnv resolves configuration from the environment and defaults only.
@@ -66,7 +66,7 @@ func Load(ov Overrides) (Config, error) {
 		c.CCRPath = p
 	}
 
-	ttl, err := positiveInt("HEADROOM_CCR_TTL_SECONDS", int(defaultTTL/time.Second))
+	ttl, err := positiveInt("HEADROOM_CCR_TTL_SECONDS", defaultTTLSeconds)
 	if err != nil {
 		return Config{}, err
 	}
@@ -106,18 +106,18 @@ func (c Config) BackendConfig() ccr.BackendConfig {
 	}
 }
 
-func pick(flagVal *string, envKey, def string) string {
-	if flagVal != nil && *flagVal != "" {
-		return *flagVal
+func pick(flagVal, envKey, def string) string {
+	if flagVal != "" {
+		return flagVal
 	}
-	if v := osGetenv(envKey); v != "" {
+	if v := os.Getenv(envKey); v != "" {
 		return v
 	}
 	return def
 }
 
 func positiveInt(envKey string, def int) (int, error) {
-	v := osGetenv(envKey)
+	v := os.Getenv(envKey)
 	if v == "" {
 		return def, nil
 	}
@@ -130,5 +130,3 @@ func positiveInt(envKey string, def int) (int, error) {
 	}
 	return n, nil
 }
-
-var osGetenv = os.Getenv

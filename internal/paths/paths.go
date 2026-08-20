@@ -30,15 +30,6 @@ func CCRDBPath() (string, error) {
 	return filepath.Join(h, "ccr.db"), nil
 }
 
-// LogsDir returns the directory the proxy writes proxy.log into (v0.2).
-func LogsDir() (string, error) {
-	h, err := Home()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(h, "logs"), nil
-}
-
 // EnsureDir creates dir and any missing parents. The 0o700 mode keeps CCR
 // payloads, which are verbatim tool output, readable only by their owner.
 func EnsureDir(dir string) error {

@@ -85,9 +85,7 @@ func TestFlagOverridesEnv(t *testing.T) {
 	t.Setenv("HEADROOM_HOME", t.TempDir())
 	t.Setenv("HEADROOM_PROXY_URL", "http://from-env:1111")
 
-	backend := "memory"
-	proxy := "http://from-flag:2222"
-	c, err := Load(Overrides{CCRBackend: &backend, ProxyURL: &proxy})
+	c, err := Load(Overrides{CCRBackend: "memory", ProxyURL: "http://from-flag:2222"})
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -173,9 +171,7 @@ func TestCCRPathAndModelHonourEnvThenFlag(t *testing.T) {
 		t.Errorf("CCRPath = %q, want the env value", c.CCRPath)
 	}
 
-	path := "/tmp/from-flag.db"
-	model := "claude"
-	if c, err = Load(Overrides{CCRPath: &path, Model: &model}); err != nil {
+	if c, err = Load(Overrides{CCRPath: "/tmp/from-flag.db", Model: "claude"}); err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 	if c.CCRPath != "/tmp/from-flag.db" {

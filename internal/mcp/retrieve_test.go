@@ -25,6 +25,24 @@ func decodeRetrieve(t *testing.T, res *mcpgo.CallToolResult) retrieveResult {
 	return out
 }
 
+// proxyServer builds a Server whose proxy is h.
+func proxyServer(t *testing.T, h http.HandlerFunc) *Server {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 100, TTLSeconds: 3600})
+	if err != nil {
+		t.Fatalf("ccr.FromConfig: %v", err)
+	}
+	return NewServer(Deps{
+		Router:    router.NewDefault(),
+		Store:     store,
+		Tokenizer: tokenizer.GetTokenizer("claude"),
+		ProxyURL:  srv.URL,
+		Version:   "test",
+	})
+}
+
 func TestRetrieveLocalHit(t *testing.T) {
 	s, store := newTestServer(t)
 	payload := "the original tool output"
@@ -62,7 +80,7 @@ func TestRetrieveProxyFallbackAndLocalCaching(t *testing.T) {
 
 	var calls int
 	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := proxyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.URL.Path != "/v1/retrieve" {
 			t.Errorf("proxy path = %q, want /v1/retrieve", r.URL.Path)
@@ -74,19 +92,6 @@ func TestRetrieveProxyFallbackAndLocalCaching(t *testing.T) {
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"content": payload})
-	}))
-	defer srv.Close()
-
-	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 100, TTLSeconds: 3600})
-	if err != nil {
-		t.Fatalf("ccr.FromConfig: %v", err)
-	}
-	s := NewServer(Deps{
-		Router:    router.NewDefault(),
-		Store:     store,
-		Tokenizer: tokenizer.GetTokenizer("claude"),
-		ProxyURL:  srv.URL,
-		Version:   "test",
 	})
 
 	out := decodeRetrieve(t, callTool(t, s, "headroom_retrieve", map[string]any{"hash": hash}))
@@ -135,46 +140,15 @@ func TestRetrieveRejectsMalformedHash(t *testing.T) {
 
 func TestRetrieveIgnoresNon200Proxy(t *testing.T) {
 	// The body is a well-formed hit, so only the status check can reject it.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	s := proxyServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"content": "a payload behind a 500"})
-	}))
-	defer srv.Close()
-
-	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 100, TTLSeconds: 3600})
-	if err != nil {
-		t.Fatalf("ccr.FromConfig: %v", err)
-	}
-	s := NewServer(Deps{
-		Router:    router.NewDefault(),
-		Store:     store,
-		Tokenizer: tokenizer.GetTokenizer("claude"),
-		ProxyURL:  srv.URL,
-		Version:   "test",
 	})
 	out := decodeRetrieve(t, callTool(t, s, "headroom_retrieve", map[string]any{"hash": "aabbccddeeff001122334455"}))
 	if out.Found {
 		t.Error("a 500 from the proxy was treated as a hit")
 	}
-}
-
-// proxyServer builds a Server whose proxy is h.
-func proxyServer(t *testing.T, h http.HandlerFunc) *Server {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 100, TTLSeconds: 3600})
-	if err != nil {
-		t.Fatalf("ccr.FromConfig: %v", err)
-	}
-	return NewServer(Deps{
-		Router:    router.NewDefault(),
-		Store:     store,
-		Tokenizer: tokenizer.GetTokenizer("claude"),
-		ProxyURL:  srv.URL,
-		Version:   "test",
-	})
 }
 
 func TestRetrieveIgnoresEmptyProxyContent(t *testing.T) {

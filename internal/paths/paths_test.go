@@ -44,14 +44,6 @@ func TestLayoutPathsHangOffHome(t *testing.T) {
 	if want := filepath.Join(base, "ccr.db"); db != want {
 		t.Errorf("CCRDBPath() = %q, want %q", db, want)
 	}
-
-	logs, err := LogsDir()
-	if err != nil {
-		t.Fatalf("LogsDir() error: %v", err)
-	}
-	if want := filepath.Join(base, "logs"); logs != want {
-		t.Errorf("LogsDir() = %q, want %q", logs, want)
-	}
 }
 
 func TestEnsureDirCreatesNestedDirAndIsIdempotent(t *testing.T) {

@@ -20,28 +20,14 @@ func newMCPCmd() *cobra.Command {
 		Short: "Model Context Protocol server",
 	}
 
-	var backend, ccrPath, proxyURL, model string
+	var ov config.Overrides
 	serve := &cobra.Command{
 		Use:           "serve",
 		Short:         "Serve headroom_compress, headroom_retrieve, and headroom_stats over stdio",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			ov := config.Overrides{}
-			if cmd.Flags().Changed("ccr-backend") {
-				ov.CCRBackend = &backend
-			}
-			if cmd.Flags().Changed("ccr-path") {
-				ov.CCRPath = &ccrPath
-			}
-			if cmd.Flags().Changed("proxy-url") {
-				ov.ProxyURL = &proxyURL
-			}
-			if cmd.Flags().Changed("model") {
-				ov.Model = &model
-			}
-
+		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(ov)
 			if err != nil {
 				return err
@@ -66,10 +52,10 @@ func newMCPCmd() *cobra.Command {
 			return srv.ServeStdio()
 		},
 	}
-	serve.Flags().StringVar(&backend, "ccr-backend", "", "CCR store backend: sqlite or memory (env HEADROOM_CCR_BACKEND)")
-	serve.Flags().StringVar(&ccrPath, "ccr-path", "", "SQLite CCR file path (env HEADROOM_CCR_PATH)")
-	serve.Flags().StringVar(&proxyURL, "proxy-url", "", "headroom proxy base URL for retrieve fallback (env HEADROOM_PROXY_URL)")
-	serve.Flags().StringVar(&model, "model", "", "model name for token counting (env HEADROOM_MODEL)")
+	serve.Flags().StringVar(&ov.CCRBackend, "ccr-backend", "", "CCR store backend: sqlite or memory (env HEADROOM_CCR_BACKEND)")
+	serve.Flags().StringVar(&ov.CCRPath, "ccr-path", "", "SQLite CCR file path (env HEADROOM_CCR_PATH)")
+	serve.Flags().StringVar(&ov.ProxyURL, "proxy-url", "", "headroom proxy base URL for retrieve fallback (env HEADROOM_PROXY_URL)")
+	serve.Flags().StringVar(&ov.Model, "model", "", "model name for token counting (env HEADROOM_MODEL)")
 
 	mcpCmd.AddCommand(serve)
 	return mcpCmd
