@@ -151,6 +151,27 @@ func TestDiffCompressorNeverInflates(t *testing.T) {
 	}
 }
 
+func TestDiffCompressorNeverInflatesWhenDroppedHunkIsSmallerThanMarkerOverhead(t *testing.T) {
+	// The kept hunk keeps the file headers; the second hunk is
+	// whitespace-only noise and gets dropped. The dropped bytes are far
+	// smaller than the "... N hunk(s) dropped" line plus the CCR marker,
+	// so appending those must not be allowed to make the output longer
+	// than the input.
+	in := "diff --git a/a.go b/a.go\nindex 1..2 100644\n--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -9,1 +9,1 @@\n-x\n+ x\n"
+	store := newMapStore()
+	out, err := NewDiffCompressor(DefaultDiffConfig()).
+		Apply(in, transform.CompressionContext{}, store)
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if len(out.Output) > len(in) {
+		t.Errorf("Output is %d bytes, input is %d: never-inflate violated", len(out.Output), len(in))
+	}
+	if out.BytesSaved < 0 {
+		t.Errorf("BytesSaved = %d, want >= 0", out.BytesSaved)
+	}
+}
+
 func TestDiffCompressorSkipsNonDiffInput(t *testing.T) {
 	_, err := NewDiffCompressor(DefaultDiffConfig()).
 		Apply("this is not a diff", transform.CompressionContext{}, newMapStore())
