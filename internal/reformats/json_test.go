@@ -93,12 +93,16 @@ func TestJsonMinifierRejectsInvalidJSON(t *testing.T) {
 
 func TestJsonMinifierRejectsTrailingContent(t *testing.T) {
 	// json.Decoder.Decode only consumes the first JSON value; without an
-	// explicit dec.More() check, trailing bytes after that value are
-	// silently discarded, which would be data loss for a lossless
-	// transform with no CCR backing.
+	// explicit trailing-content check, bytes after that value are silently
+	// discarded, which would be data loss for a lossless transform with no
+	// CCR backing. dec.More() alone is not enough: it reports false when the
+	// remainder starts with a closing delimiter (]/}), since Decoder treats
+	// those as end-of-container tokens rather than trailing content.
 	for _, in := range []string{
 		`{"a":1}   and then some prose the model wrote`,
 		`[1,2,3]xyz`,
+		`{"a":1} ]`,
+		`{"a":1} }`,
 	} {
 		_, err := (JsonMinifier{}).Apply(in)
 		if !errors.Is(err, transform.ErrInvalidInput) {

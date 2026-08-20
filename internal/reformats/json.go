@@ -36,7 +36,7 @@ func (JsonMinifier) Apply(content string) (transform.ReformatOutput, error) {
 	if err := dec.Decode(&v); err != nil {
 		return transform.ReformatOutput{}, fmt.Errorf("json_minifier: decode: %w", transform.ErrInvalidInput)
 	}
-	if dec.More() {
+	if strings.TrimSpace(content[dec.InputOffset():]) != "" {
 		return transform.ReformatOutput{}, fmt.Errorf("json_minifier: trailing content: %w", transform.ErrInvalidInput)
 	}
 
