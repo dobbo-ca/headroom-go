@@ -86,7 +86,13 @@ func parseDiff(s string) ([]string, []hunk) {
 
 	for _, line := range lines {
 		switch {
-		case isFileHeader(line):
+		// File-header prefixes only count outside a hunk body, where a
+		// deleted line (e.g. "-- old comment" -> "--- old comment") could
+		// otherwise false-positive as a "---" file marker and truncate the
+		// hunk. "diff --git " is the one exception: it starts a new file
+		// section unconditionally, and a deleted line can never render as
+		// "diff --git ..." (it would render as "-diff --git ...").
+		case (current == nil && isFileHeader(line)), strings.HasPrefix(line, "diff --git "):
 			flush()
 			started = true
 			if f, ok := fileFromHeader(line); ok {

@@ -79,6 +79,63 @@ func TestParseDiffOnEmptyInputFindsNoHunks(t *testing.T) {
 	}
 }
 
+func TestParseDiffKeepsBodyLinesThatLookLikeFileHeaders(t *testing.T) {
+	// A deleted "-- old comment" line renders as "--- old comment", which
+	// must not be mistaken for a "--- a/file" marker and truncate the hunk.
+	in := `diff --git a/q.sql b/q.sql
+index 111..222 100644
+--- a/q.sql
++++ b/q.sql
+@@ -1,4 +1,4 @@
+ SELECT 1;
+--- old comment
++-- new comment
+ SELECT 2;`
+	_, hunks := parseDiff(in)
+	if len(hunks) != 1 {
+		t.Fatalf("got %d hunks, want 1", len(hunks))
+	}
+	body := strings.Join(hunks[0].body, "\n")
+	for _, want := range []string{"--- old comment", "+-- new comment", " SELECT 2;"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("hunk body = %q, want it to contain %q", body, want)
+		}
+	}
+}
+
+func TestParseDiffAttributesFileFromPlusPlusPlusWithoutDiffGitLine(t *testing.T) {
+	// Plain "diff -u" output has no "diff --git" line, so the hunk's file
+	// must come from the "+++" marker instead.
+	in := `--- a/x
++++ b/x
+@@ -1,1 +1,1 @@
+-old
++new`
+	_, hunks := parseDiff(in)
+	if len(hunks) != 1 {
+		t.Fatalf("got %d hunks, want 1", len(hunks))
+	}
+	if hunks[0].file != "x" {
+		t.Errorf("hunks[0].file = %q, want x", hunks[0].file)
+	}
+}
+
+func TestParseDiffDoesNotAttributeFileFromDevNull(t *testing.T) {
+	// A deleted file's "+++" line points at /dev/null; that must not
+	// become the file name.
+	in := `--- a/x
++++ /dev/null
+@@ -1,1 +0,0 @@
+-old`
+	_, hunks := parseDiff(in)
+	if len(hunks) != 1 {
+		t.Fatalf("got %d hunks, want 1", len(hunks))
+	}
+	if hunks[0].file == "/dev/null" {
+		t.Error("hunks[0].file = /dev/null, want it left unset")
+	}
+}
+
 func TestIsLockfileMatchesKnownNames(t *testing.T) {
 	for _, p := range []string{
 		"go.sum", "vendor/go.sum", "package-lock.json", "a/b/yarn.lock",
@@ -132,6 +189,21 @@ func TestIsWhitespaceOnlyIgnoresFileMarkerLines(t *testing.T) {
 	}}
 	if !isWhitespaceOnly(h) {
 		t.Error("isWhitespaceOnly = false; --- and +++ must not count as content")
+	}
+}
+
+func TestIsWhitespaceOnlyDetectsReorderedLines(t *testing.T) {
+	// Same two lines reindented, but also swapped in order: only sorting
+	// both sides before comparing makes this match.
+	h := hunk{file: "main.go", body: []string{
+		"@@ -1,3 +1,3 @@",
+		"-  a := 1",
+		"-  b := 2",
+		"+\tb := 2",
+		"+\ta := 1",
+	}}
+	if !isWhitespaceOnly(h) {
+		t.Error("isWhitespaceOnly = false, want true for a reordered reindent")
 	}
 }
 
