@@ -65,6 +65,7 @@ func NewServer(d Deps) *Server {
 	}
 	s.mcp.AddTool(compressTool(), s.handleCompress)
 	s.mcp.AddTool(retrieveTool(), s.handleRetrieve)
+	s.mcp.AddTool(statsTool(), s.handleStats)
 	return s
 }
 
