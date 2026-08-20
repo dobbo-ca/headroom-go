@@ -89,7 +89,11 @@ func TestDedupWarningsHandlesNonASCIIBeforeMarker(t *testing.T) {
 	// \x89 is invalid UTF-8; strings.ToLower would expand it to a
 	// multi-byte replacement and desync the marker index from the
 	// original line, which used to panic on a slice out of range.
-	in := "\x89wArn: dup"
+	// The marker-with-no-body form pushes the desynced index past the
+	// end of the line, which is what actually trips the panic; a longer
+	// input with a body stays in bounds and passes under both the fixed
+	// and the reverted implementation.
+	in := "\x89wArn:"
 	if got := dedupWarnings(in); got != in {
 		t.Errorf("dedupWarnings = %q, want unchanged %q", got, in)
 	}
