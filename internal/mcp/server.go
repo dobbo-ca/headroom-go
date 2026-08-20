@@ -64,6 +64,7 @@ func NewServer(d Deps) *Server {
 		mcp:  server.NewMCPServer("headroom", d.Version, server.WithToolCapabilities(false)),
 	}
 	s.mcp.AddTool(compressTool(), s.handleCompress)
+	s.mcp.AddTool(retrieveTool(), s.handleRetrieve)
 	return s
 }
 
