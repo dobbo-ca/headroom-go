@@ -168,6 +168,19 @@ func TestParseDiffPreservesTrailingFileSectionWithoutHunk(t *testing.T) {
 	}
 }
 
+func TestParseDiffTrailingNewlineDoesNotAddAPhantomHunk(t *testing.T) {
+	// A trailing "\n" (the norm for real `git diff` output) leaves one
+	// blank line in pending after the last real hunk closes. That blank
+	// line must not turn into its own headers-only hunk.
+	withoutTrailing := twoFileDiff
+	withTrailing := twoFileDiff + "\n"
+	_, hunksWithout := parseDiff(withoutTrailing)
+	_, hunksWith := parseDiff(withTrailing)
+	if len(hunksWith) != len(hunksWithout) {
+		t.Fatalf("got %d hunks with a trailing newline, want %d (same as without)", len(hunksWith), len(hunksWithout))
+	}
+}
+
 func TestIsLockfileMatchesKnownNames(t *testing.T) {
 	for _, p := range []string{
 		"go.sum", "vendor/go.sum", "package-lock.json", "a/b/yarn.lock",

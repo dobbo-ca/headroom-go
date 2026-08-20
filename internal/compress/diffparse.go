@@ -162,11 +162,23 @@ func parseDiff(s string) ([]string, []hunk) {
 	// A file section with no @@ block (binary files, mode-only changes,
 	// empty file creation) leaves its header lines in pending with no hunk
 	// to carry them. Wrap them in a headers-only hunk so they survive
-	// instead of being dropped on the floor.
-	if len(pending) > 0 {
+	// instead of being dropped on the floor. A trailing newline in the
+	// input instead leaves a single blank line in pending, which is not a
+	// real header section and must not become a phantom hunk.
+	if hasNonBlankLine(pending) {
 		hunks = append(hunks, hunk{file: file, header: pending})
 	}
 	return preamble, hunks
+}
+
+// hasNonBlankLine reports whether any line holds non-whitespace content.
+func hasNonBlankLine(lines []string) bool {
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // contentLines splits a hunk body into its added and removed content,
