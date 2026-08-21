@@ -46,6 +46,45 @@ pick. Three rules follow, and the code enforces all three:
 If Ollama is not running, every lookup misses and the gateway behaves exactly
 as it does with the cache disabled.
 
+## MCP server
+
+```bash
+go build -o headroom ./cmd/headroom
+./headroom mcp serve
+```
+
+Register it with an MCP client, for example Claude Code:
+
+```bash
+claude mcp add headroom -- /path/to/headroom mcp serve
+```
+
+Three tools are exposed over stdio:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `headroom_compress` | `content` (required), `query` | `compressed`, `hash`, `content_type`, `original_tokens`, `compressed_tokens`, `bytes_saved`, `steps_applied`, `cache_keys` |
+| `headroom_retrieve` | `hash` (required), `query` (reserved) | `found`, `source` (`local`, `proxy`, or `none`), `hash`, `content` |
+| `headroom_stats` | none | Session counters: calls, bytes, tokens, and CCR hit rates |
+
+`headroom_compress` never returns text that costs more tokens than its input
+(I5). When compression would not help, it returns the original verbatim with
+`bytes_saved: 0` and an empty `hash`.
+
+### Configuration
+
+Precedence is flag, then environment variable, then default.
+
+| Flag | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `--ccr-backend` | `HEADROOM_CCR_BACKEND` | `sqlite` | `sqlite` or `memory` |
+| `--ccr-path` | `HEADROOM_CCR_PATH` | `~/.headroom/ccr.db` | SQLite store file |
+| `--proxy-url` | `HEADROOM_PROXY_URL` | `http://127.0.0.1:8787` | Retrieve fallback base URL |
+| `--model` | `HEADROOM_MODEL` | `claude` | Model name used for token counting |
+| — | `HEADROOM_CCR_TTL_SECONDS` | `3600` | CCR entry lifetime |
+| — | `HEADROOM_CCR_CAPACITY` | `1000` | In-memory FIFO cap; SQLite ignores it |
+| — | `HEADROOM_HOME` | `~/.headroom` | Base directory for all of the above |
+
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE`.

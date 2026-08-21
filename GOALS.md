@@ -16,6 +16,10 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
       (log/diff/diff_noise/json; search built-unregistered), signals,
       relevance (BM25+Hybrid), adaptive (simplified), tagprotect, toolpairs;
       wired into router.NewDefault. SmartCrusher (JSON crush) is Plan 3.
+- [x] (Plan 4) Entrypoints: internal/paths (~/.headroom layout), internal/config
+      (HEADROOM_* schema, flag>env>default), internal/mcp (stdio server with
+      headroom_compress / headroom_retrieve / headroom_stats), and the
+      cmd/headroom cobra CLI. v0.1 spec items 10 and 11 are complete.
 
 ## Follow-ups
 
