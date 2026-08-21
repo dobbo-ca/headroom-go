@@ -1,0 +1,8 @@
+{
+  "name": "scalar_number_passthrough",
+  "path": "lossy",
+  "content": "42",
+  "wasModified": false,
+  "recordedCompressedLen": 2,
+  "byteExact": true
+}

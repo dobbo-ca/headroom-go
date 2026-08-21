@@ -1,0 +1,8 @@
+{
+  "name": "string_array_25",
+  "path": "lossy",
+  "content": "[\n  \"log entry number 0 with some text\",\n  \"log entry number 1 with some text\",\n  \"log entry number 2 with some text\",\n  \"log entry number 3 with some text\",\n  \"log entry number 4 with some text\",\n  \"log entry number 5 with some text\",\n  \"log entry number 6 with some text\",\n  \"log entry number 7 with some text\",\n  \"log entry number 8 with some text\",\n  \"log entry number 9 with some text\",\n  \"log entry number 10 with some text\",\n  \"log entry number 11 with some text\",\n  \"log entry number 12 with some text\",\n  \"log entry number 13 with some text\",\n  \"log entry number 14 with some text\",\n  \"log entry number 15 with some text\",\n  \"log entry number 16 with some text\",\n  \"log entry number 17 with some text\",\n  \"log entry number 18 with some text\",\n  \"log entry number 19 with some text\",\n  \"log entry number 20 with some text\",\n  \"log entry number 21 with some text\",\n  \"log entry number 22 with some text\",\n  \"log entry number 23 with some text\",\n  \"log entry number 24 with some text\"\n]",
+  "wasModified": true,
+  "recordedCompressedLen": 916,
+  "ratioBoundOnly": true
+}

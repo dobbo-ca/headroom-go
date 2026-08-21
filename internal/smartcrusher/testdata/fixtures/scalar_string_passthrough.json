@@ -1,0 +1,8 @@
+{
+  "name": "scalar_string_passthrough",
+  "path": "lossy",
+  "content": "\"hello world\"",
+  "wasModified": false,
+  "recordedCompressedLen": 13,
+  "byteExact": true
+}

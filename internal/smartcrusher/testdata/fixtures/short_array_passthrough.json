@@ -1,0 +1,8 @@
+{
+  "name": "short_array_passthrough",
+  "path": "lossy",
+  "content": "[1, 2, 3]",
+  "wasModified": true,
+  "recordedCompressedLen": 7,
+  "recordedCompressed": "[1,2,3]"
+}

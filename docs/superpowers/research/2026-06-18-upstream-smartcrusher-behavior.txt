@@ -1,0 +1,2222 @@
+
+====================================================================================================
+HEADER: UPSTREAM SmartCrusher BEHAVIOR REFERENCE (Plan 3 — clean-room Go port)
+====================================================================================================
+Authoritative upstream-behavior reference for headroom-go's SmartCrusher port (Plan 3). Downstream
+implementers read ONLY this file, never the Rust. Every constant, marker literal, and ordered
+algorithm is preserved verbatim. Source crate: crates/headroom-core/src/transforms/smart_crusher/*.
+
+----------------------------------------------------------------------------------------------------
+(a) MVP SCOPE  (spec §8.5 — IMPLEMENT THESE)
+----------------------------------------------------------------------------------------------------
+  * Lossless compaction table: the [N]{col:type} CSV-schema rendering (CsvSchemaFormatter) +
+    dotted-flatten of nested-uniform object columns + the savings gate.
+      >>> SAVINGS GATE VALUE CONFLICT (must resolve): two values appear across the units.
+          - config.rs (authoritative config default): lossless_min_savings_ratio = 0.15
+            (upstream LOWERED it from 0.30 so cleanly-tabular input takes the lossless path more often).
+          - crusher.rs doc/usage + the Plan-3 task brief + parity tests: 0.30.
+          DECISION FOR PLAN 3 MVP: use 0.30 as the default lossless gate (matches crusher.rs +
+          parity fixtures + task brief), but make it a Config field (LosslessMinSavingsRatio) so
+          tests can override to 0.99 to force the lossy path. Document the 0.15-vs-0.30 divergence
+          in code. (The gate lives in crush_array / the orchestrator, NOT in compaction/formatter.)
+  * Opaque CCR cells: long base64/HTML/long-string field values -> comma-form CCR marker.
+  * Error / outlier / anchor preservation: ERROR_KEYWORDS, structural outliers, rare-status
+    (Pareto), query-anchor extraction + matching, numeric anomalies.
+  * SmartSample lossy fallback: drop rows + emit space-form CCR marker + stash original in CCR store.
+  * field_detect: detect_id_field_statistically + detect_score_field_statistically.
+  * Analyzer crushability tree: analyze_array / analyze_crushability / analyze_field /
+    detect_change_points / detect_pattern / detect_temporal_field / select_strategy /
+    estimate_reduction.
+  * MAX_PROCESS_DEPTH / MAX_DEPTH = 50 recursion guard (in walker/process_value + analyzer tree walk).
+
+----------------------------------------------------------------------------------------------------
+(b) DEFERRED  (NOTE but do NOT plan to implement in Plan 3)
+----------------------------------------------------------------------------------------------------
+  * Buckets / heterogeneous arrays: Compaction::Buckets, detect_discriminator, bucket_by,
+    crush_mixed_array, the MixedArray classify branch's downstream crusher.
+  * Stringified-JSON nesting recursion (walker try_parse_json_container deep recurse is in walker.rs
+    and is technically MVP there, BUT the task brief lists it deferred — see walker subsystem note;
+    confirm include-or-stub for MVP).
+  * TopN / TimeSeries / ClusterSample strategies (plan_top_n, plan_cluster_sample, plan_time_series).
+  * crush_string_array / crush_number_array / crush_object (the three heavy per-type crushers — ALL
+    depend on compute_optimal_k -> Kneedle).
+  * Full compute_optimal_k (SimHash dedup + Kneedle elbow + zlib). MVP uses a simplified adaptive K.
+  * Observer / CrushEvent / TracingObserver telemetry (stub or omit — zero effect on output).
+  * format_g (Python %g float-format parity helper). Decision B forbids porting it.
+  * TOIN learned-important indices / field_semantics (learned_indices hardwired empty).
+  * factor_out_constants sentinel (port the gate; default OFF, rarely active).
+
+----------------------------------------------------------------------------------------------------
+(c) GO PORTING RULES (apply everywhere)
+----------------------------------------------------------------------------------------------------
+  (1) ORDERED JSON: use github.com/iancoleman/orderedmap for ALL JSON objects on the compression
+      path. map[string]any is BANNED. Object key insertion order is load-bearing (process_value
+      first-pass recursion, python_safe_json_dumps, _constant_fields/_ccr_dropped sentinel placement,
+      uniform_object_keys ORDERED-slice equality, column order). NOTE: orderedmap is NOT yet in
+      go.mod — Plan 3 adds github.com/iancoleman/orderedmap.
+  (2) BYTE LENGTH: Rust .len() on String/str is a BYTE count -> Go len(string). NEVER
+      utf8.RuneCountInString for byte-saving math (estimate_array_bytes, savings_ratio numerator/
+      denominator, observer input/output_bytes, rendered.len() "len=%d", byte_size, humanize input,
+      token estimates). EXCEPTIONS where rune/char count IS correct (statistical length features, NOT
+      byte-saving): FieldStats.avg_length (chars().count()), crush_string_array length-anomaly
+      (chars().count()), calculate_string_entropy (code points). Cluster-hash uses .chars().take(50)
+      (char count) but is DEFERRED.
+  (3) THREE CCR MARKER FORMS — keep as THREE SEPARATE builders, do NOT unify:
+        - canonical (live-zone):    <<ccr:HASH>>                       (NOT emitted by smart_crusher
+                                                                        files; built elsewhere)
+        - comma-form (compaction opaque cell):  <<ccr:HASH,KIND,SIZE>>  e.g. <<ccr:abc,base64,4.5KB>>
+        - space-form (lossy row drop):          <<ccr:HASH N_rows_offloaded>>
+                                                e.g. <<ccr:89f81e97033e 15_rows_offloaded>>
+      Non-marker SENTINEL OBJECTS this code also builds (NOT <<ccr:...>> forms):
+        - lossy-drop sentinel appended as LAST array element: {"_ccr_dropped":"<<ccr:HASH N_rows_offloaded>>"}
+        - factor-constants sentinel prepended as element 0:   {"_constant_fields":{...}}
+        - json_offload bespoke wrapper marker (NOT a <<ccr:...>> form):
+            "\n[json_offload CCR: hash=<md5_hex_24>]"
+  (4) DECISION B — NO BYTE-PARITY: do NOT replicate Rust/Python float formatting (%g, banker's
+      rounding, BUG#1 percentile string, padding/percentile cosmetics). Capture behavior + ratio
+      bounds + marker/strategy SHAPES, not byte-exact compressed output. The four upstream Python
+      bugs are ANTI-REQUIREMENTS in Go (implement the CORRECT behavior):
+        BUG#1 percentile: use proper linear-interpolation percentile (numpy 'linear'), not int-div idx.
+        BUG#2 sequential: zero-padded numeric strings (e.g. ["001".."010"]) are NOT sequential
+              (categorical) — gate on hadNonStringNumeric.
+        BUG#3 rare-status: NO >10-distinct short-circuit — cardinality cap raised to 50.
+        BUG#4 k-split: k_first+k_last clamped to <= k_total (respect max_items_after_crush).
+      EXCEPTION: enum as_str() strings ("dict_array","smart_sample","cluster","top_n", etc.),
+      ERROR_KEYWORDS, hash hex, and marker structural literals ARE byte-pinned (identifiers, not
+      float formatting) — replicate exactly.
+  (5) SEAM (zero-blast-radius): existing internal/offloads:
+        type Crusher interface { Crush(content, query string, bias float64) CrushResult }
+        type CrushResult struct { Compressed string; WasModified bool }
+      The seam CrushResult has NO Strategy/Original field. SmartCrusher internally computes
+      (compressed, wasModified, info) and maps crushed->Compressed, wasModified->WasModified at the
+      boundary (info/strategy dropped). Plan 3 swaps passthroughCrusher{} -> *SmartCrusher in
+      offloads.NewJsonOffload (json_offload.go) with ZERO changes to other packages. The internal
+      types.CrushResult is RICHER (4 fields: Compressed/Original/WasModified/Strategy) — keep it
+      INTERNAL, do NOT widen the seam type.
+
+----------------------------------------------------------------------------------------------------
+(d) CONSOLIDATED CONSTANTS TABLE (every exact value, deduped)
+----------------------------------------------------------------------------------------------------
+  RECURSION / SIZE GATES
+    MAX_PROCESS_DEPTH / MAX_DEPTH        = 50      (process_value + analyzer tree walk; mirrors Python 50)
+    min_items_to_analyze                = 5       (Config default; array/object/mixed-group gate)
+    min_tokens_to_crush                 = 200     (Config default; below -> passthrough)
+    max_items_after_crush               = 15      (Config default; >0 => maxK cap, 0 => uncapped)
+    compute_optimal_k min_k arg         = 3       (hardcoded 3rd positional arg)
+    mixed_array passthrough threshold   = 8       (n<=8 -> mixed:passthrough; DEFERRED)
+    n<=8 per-type passthrough threshold = 8       (string/number/object crushers; DEFERRED)
+    MIN_ITEMS_FOR_OUTLIER_DETECTION     = 5       (detect_structural_outliers guard)
+
+  LOSSLESS / SAVINGS
+    lossless_min_savings_ratio (config) = 0.15    (config.rs default — upstream lowered)
+    lossless_min_savings_ratio (gate)   = 0.30    (crusher.rs / parity / PLAN-3 MVP default — USE THIS)
+    test override to force lossy        = 0.99
+    estimate_array_bytes formula        = sum(len(item_str)) + (n-1 saturating) + 2
+
+  CCR HASHING / MARKERS
+    space-form hash prefix (crusher.rs) = SHA-256 first 6 bytes -> 12 lowercase hex chars
+    comma-form hash (walker.rs Rust)    = SHA-256 first 6 bytes -> 12 hex (BUT Go reuses
+                                          ccr.ComputeKey = BLAKE3 first 12 bytes -> 24 hex)
+    compactor hash_opaque               = SHA-256 first 6 bytes -> 12 hex (hex.EncodeToString(sum[:6]))
+    json_offload wrapper key            = MD5(content) lowercase hex, first 24 chars (ccr.ComputeKeyMD5)
+    hash_field_name (TOIN cache key)    = SHA-256 first 8 hex chars (NOT MD5, NOT [:16])
+    item_content_hash / compute_item_hash (orchestration/anchors dedup)
+                                        = MD5(python_json_dumps_sort_keys) lowercase hex first 16 chars
+    enable_ccr_marker (config)          = true    (gates space-form marker + store write; NOT opaque cell)
+
+  SAMPLING / FRACTIONS
+    first_fraction                      = 0.3
+    last_fraction                       = 0.15
+    first_anchors (orchestration)       = 3       (indices 0..min(3,n))
+    last_anchors  (orchestration)       = 2       (indices n-2..n)
+    dedup_identical_items               = true
+    variance_threshold                  = 2.0     (sigma multiplier: change-point + numeric anomaly)
+    uniqueness_threshold                = 0.1
+    similarity_threshold                = 0.8
+    relevance_threshold                 = 0.3
+    preserve_change_points              = true
+    factor_out_constants                = false
+    include_summaries                   = false
+    use_feedback_hints                  = true
+    toin_confidence_threshold           = 0.5
+
+  COMPACTION (CompactConfig)
+    MinItems                            = 2
+    CoreFieldFraction                   = 0.8     (core if freq >= ceil(total*0.8))
+    HeterogeneousCoreRatio (CODE)       = 0.6     (DOC says 0.5 — TRUST 0.6)  [DEFERRED consumer]
+    MaxFlattenInnerKeys                 = 6
+    MinBuckets                          = 2       [DEFERRED]
+    MaxBuckets                          = 8       [DEFERRED]
+    discriminator reject ratio          = 0.7     [DEFERRED]
+    JsonArray/StringifiedJson recurse min len = 2
+    flatten placeholder type_tag        = "string"
+    missing-bucket-key sentinel         = "__missing__"  [DEFERRED]
+
+  CLASSIFIER (ClassifyConfig)
+    opaque_min_bytes                    = 256     (strictly > this -> opaque candidate)
+    base64_alphabet_ratio               = 0.95
+    html_min_open_brackets              = 3
+    base64 hardcoded min length         = 64 bytes
+    base64 hardcoded unique-char floor  = 16
+    base64 alphabet extra chars         = + / = _ -
+    html tag-start next-byte set        = ascii-alpha OR '/' OR '!'
+    stringified-JSON gate first chars   = '{' or '['
+
+  FIELD_DETECT (ID)
+    ID hard gate unique_ratio           = 0.9     (strict < -> not ID)
+    ID uuid sample size                 = 20      (take(20) THEN filter strings)
+    ID uuid fraction threshold          = 0.8     (>0.8 -> conf 0.95)
+    ID entropy threshold                = 0.7     (avg>0.7 & uniq>0.95 -> conf 0.8)
+    ID entropy unique_ratio             = 0.95
+    ID sequential conf                  = 0.9     (sequential & uniq>0.95)
+    ID range conf                       = 0.85    (range>0 & uniq>0.95)
+    ID catch-all unique_ratio           = 0.98    (>0.98 -> conf 0.7)
+
+  FIELD_DETECT (SCORE)
+    range [0,1] bonus                   = +0.4
+    range [0,10] bonus                  = +0.3
+    range [0,100] bonus                 = +0.25
+    range [-1,1] asymmetric bonus       = +0.35   (min>=-1 AND max<=1 ONLY — do NOT symmetrize)
+    sample seq size                     = 50
+    descending min values               = 5
+    descending fraction threshold       = 0.7     (>0.7 -> +0.3)
+    descending bonus                    = +0.3
+    float sample size                   = 20
+    float fraction threshold            = 0.3     (>30% -> +0.1)
+    float bonus                         = +0.1
+    score decision threshold            = 0.4     (is_score = conf>=0.4)
+    score confidence cap                = 0.95
+
+  ANALYZER CRUSHABILITY (decision-tree gates + confidences)
+    id_confidence gate                  = 0.7     (has_id_field)
+    score confidence gate (pattern)     = 0.5     (search_results; crushability STEP2 has NO gate)
+    non_id_content_uniqueness CASE0     = < 0.1   (+ has_id_field) -> crushable 0.85
+    low_uniqueness CASE1                = < 0.3   -> crushable 0.9
+    high_uniqueness CASE2/3             = > 0.8   (id+no signal -> skip 0.85; with signal -> crush 0.7)
+    CASE4 no-signal                     -> skip 0.6
+    CASE5 fallthrough                   -> crush 0.5
+    logs message_like                   = unique_ratio>0.5 AND avg_length>20.0
+    logs level_like                     = unique_ratio<0.1 AND unique_count in [2,10]
+    logs ClusterSample gate             = 'message'-named field unique_ratio<0.5
+    unix_seconds range                  = [1e9, 2e9] inclusive (min_val only)
+    unix_millis range                   = [1e12, 2e12] inclusive (min_val only)
+    temporal sample size                = 10      (ISO ratio > 0.5)
+    change_point window                 = 5       (min len = window*2 = 10; dedup gap cp-last > window)
+    top_values N                        = 5
+    estimate_reduction bases            = TimeSeries 0.7, ClusterSample 0.8, TopN 0.6, SmartSample 0.5,
+                                          other 0.3
+    estimate_reduction bonus & cap      = + constant_ratio*0.2, capped 0.95
+    time_series change-point window     = -2..=2 (DEFERRED; NOT gated on preserve_change_points)
+
+  STRATEGY as_str() (PARITY-PINNED — replicate exactly)
+    None="none"  Skip="skip"  TimeSeries="time_series"  ClusterSample="cluster" (NOT "cluster_sample")
+    TopN="top_n"  SmartSample="smart_sample"
+  ARRAYTYPE as_str() (PARITY-PINNED)
+    DictArray="dict_array"  StringArray="string_array"  NumberArray="number_array"
+    BoolArray="bool_array"  NestedArray="nested_array"  MixedArray="mixed_array"  Empty="empty"
+  CompressionPlan.keep_count default    = 10  (parity-pinned)
+  CrushResult passthrough strategy      = "passthrough"
+  FieldStats.field_type domain          = numeric|string|boolean|object|array|null
+  ArrayAnalysis.detected_pattern domain = time_series|logs|search_results|generic
+
+  ERROR_KEYWORDS (exactly 12, lowercase, substring-matched against lowercased item JSON)
+    error, exception, failed, failure, critical, fatal, crash, panic, abort, timeout, denied, rejected
+    (NOTE: constraints.rs rustdoc WRONGLY lists 11 omitting "failure" — TRUST the 12-element array.)
+
+  STATS-MATH
+    sample variance denominator         = n-1 (Bessel; NOT population n)
+    min values for variance/stdev       = 2
+    min values for mean/median          = 1
+    object small-value token threshold  = 50/4 = 12  (DEFERRED crush_object)
+    object token estimate               = len(val_json)/4 + len(key)/4 + 2  (BYTE len, int div) (DEFERRED)
+
+  JSON_OFFLOAD (wrapper)
+    NAME                                = "json_offload"
+    CONFIDENCE                          = 0.85 (float32)
+    AppliesTo                           = [JsonArray]
+    Crush bias arg (always)             = 0.0
+    min_array_rows (JsonOffloadConfig)  = 5
+    saturation_rows (JsonOffloadConfig) = 50
+    EstimateBloat min-rows gate         = separators < min_array_rows-1 (=4) -> 0.0
+    EstimateBloat saturation denom      = max(1, saturation_rows-1) = 49
+    row-separator substrings            = "},{"  ,  "}, {"  ,  "},\n"
+    no-savings comparison               = len(compressed) >= len(content) -> Skipped
+    wrapper marker prefix/suffix        = "\n[json_offload CCR: hash="  ...  "]"
+
+  BUILDER (OSS defaults)
+    default OSS constraint names        = ["keep_errors","keep_structural_outliers"] (order-significant)
+    default OSS constraint count        = 2
+    default OSS observer count          = 1 (TracingObserver)
+    events per crush per observer       = 1
+    default in-memory CCR store cap     = 1000   (ccr.DefaultCapacity)
+    default in-memory CCR store TTL     = 5 min  (ccr.DefaultTTL)
+
+  TRACING OBSERVER (DEFERRED telemetry)
+    name()                              = "tracing"
+    tracing target                      = "headroom::smart_crusher"
+    log message                         = "smart_crusher.crush emitted"
+    log level                           = debug
+    structured fields                   = strategy, input_bytes, output_bytes, elapsed_ns, was_modified
+
+  PARITY FIXTURES
+    fixture count assertion             = >= 17 recorded
+    CCR hash width (fixtures)           = 12 hex chars
+
+----------------------------------------------------------------------------------------------------
+(e) MVP-vs-DEFERRED BOUNDARY (each upstream feature tagged)
+----------------------------------------------------------------------------------------------------
+  MVP:
+    crusher.rs orchestration (crush, smartCrushContent, processValue, processString, crushArray
+      3-tier funnel, executePlan, sentinels, space-form marker emission + store write)
+    analyzer.rs (full crushability tree, analyze_field, detect_change_points, detect_pattern,
+      detect_temporal_field, select_strategy, estimate_reduction)
+    classifier.rs (classify_array / ArrayType — ALL 7 variants)
+    compaction/classifier.rs (classify_cell, ClassifyConfig)
+    compaction/compactor.rs (homogeneous table build, dotted flatten, hash_opaque) — EXCEPT bucketing
+    compaction/formatter.rs (CsvSchemaFormatter, JsonFormatter[nested-cell dep], formatCcrMarker,
+      humanizeBytes) — MarkdownKv opt-in; Buckets arms DEFERRED
+    compaction/ir.rs (Table/OpaqueRef/Untouched, Scalar/OpaqueRef/Missing/Nested) — Buckets DEFERRED
+    compaction/walker.rs (DocumentCompactor walk/replace, opaque cell marker, humanize,
+      try_parse_json_container) — entire file MVP (but task brief flags stringified-JSON deferred)
+    config.rs (Config struct + DefaultConfig + defaults test)
+    constraints.rs (KeepErrorsConstraint, KeepStructuralOutliersConstraint, default_oss_constraints)
+    error_keywords.rs (ERROR_KEYWORDS)
+    field_detect.rs (detect_id_field_statistically, detect_score_field_statistically)
+    hashing.rs (hash_field_name)
+    outliers.rs (detect_structural_outliers, detect_rare_status_values,
+      detect_error_items_for_preservation)
+    statistics.rs (is_uuid_format, calculate_string_entropy, detect_sequential_pattern, python_int_parse)
+    stats_math.rs (mean, sampleVariance, sampleStdev, median) — format_g DEFERRED
+    anchors.rs (extract_query_anchors, item_matches_anchors, python_repr) — "deprecated" but live
+    orchestration.rs (deduplicate_indices_by_content, fill_remaining_slots, prioritize_indices,
+      numericAnomalyIndices, itemContentHash) — learned_indices DEFERRED
+    planning.rs (create_plan dispatcher Skip+SmartSample routing, plan_smart_sample, shared helpers)
+    traits.rs (Constraint, Scorer) — Observer/CrushEvent DEFERRED
+    types.rs (all struct shapes + enum + constructors) — TimeSeries/ClusterSample/TopN variants
+      defined-but-unassigned; SummaryRanges/ClusterField/SortField empty in MVP
+    builder.rs (all setters needed for SmartCrusher.new OSS-default composition)
+    json_offload.rs (entire wrapper — already ported, swap crusher in ctor only)
+
+  DEFERRED (note, do NOT implement):
+    crushers.rs (crush_string_array, crush_number_array, crush_object, compute_k_split) — ENTIRE FILE
+    compute_optimal_k (Kneedle + SimHash + zlib)
+    Compaction::Buckets + Bucket + detect_discriminator + bucket_by + crush_mixed_array
+    plan_top_n + plan_cluster_sample + plan_time_series + detect_score_field clustering
+    observer.rs (TracingObserver) + CrushEvent telemetry
+    MarkdownKvFormatter body (port surface so FromFormatName resolves)
+    TOIN learned_indices / field_semantics / item_has_preserve_field_match (present, unexercised)
+    format_g + normalize_scientific_exp (stats_math)
+    factor_out_constants active behavior (gate ported, default off)
+    Tool-name attribution tag smart_crush:<n>:<names> (pipeline-layer, not crusher core)
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/mod.rs   ->   internal/smartcrusher/doc.go   fetchedOk= True
+====================================================================================================
+Module-surface file: pure submodule wiring + re-export hub + crate-doc. ZERO executable logic. Go
+equivalent is a package doc.go: package declaration + doc-comment only. Record the byte-parity-
+rejection note (Decision B): upstream's stated goal is byte-parity with Python, headroom-go REJECTS
+it; the four Python bugs (BUG#1-#4) are anti-requirements.
+
+-- publicApi (re-export partition) --
+  * MVP re-exports: SmartAnalyzer; extract_query_anchors/item_matches_anchors; SmartCrusherBuilder;
+    classify_array/ArrayType; SmartCrusherConfig; default_oss_constraints/KeepErrorsConstraint/
+    KeepStructuralOutliersConstraint; SmartCrusher/CrushArrayResult; ERROR_KEYWORDS;
+    detect_id_field_statistically/detect_score_field_statistically; hash_field_name;
+    detect_error_items_for_preservation/detect_rare_status_values/detect_structural_outliers;
+    item_has_preserve_field_match/map_to_anchor_pattern; calculate_string_entropy/
+    detect_sequential_pattern/is_uuid_format; mean/median/sample_stdev/sample_variance;
+    Constraint/Scorer; ArrayAnalysis/CompressionPlan/CompressionStrategy/CrushResult/
+    CrushabilityAnalysis/FieldStats.
+  * DEFERRED re-exports: compute_k_split/crush_number_array/crush_object/crush_string_array;
+    TracingObserver; deduplicate_indices_by_content/fill_remaining_slots/prioritize_indices (note:
+    these THREE are MVP per orchestration.rs unit — mod.rs doc mislabels them deferred; TRUST
+    orchestration.rs = MVP); Observer/CrushEvent; format_g.
+
+-- constants --
+  MAX_DEPTH = 50 (lives in analyzer/config, spec-mandated). savings_gate (config/compaction).
+  `pub mod compaction` is the ONLY publicly-declared submodule (22 others are private `mod`) — the
+  compaction table is the externally-visible keystone; treat compaction as the primary exported area.
+
+-- markers --  n/a (declares/re-exports only).
+-- mvp/deferred --  file itself always-present wiring; partition above.
+-- edgeCases --
+  - TWO CrushResult types: types::CrushResult (internal, 4 fields) vs offloads seam CrushResult
+    (2 fields). Conflating them is the #1 porting error.
+  - format_g re-exported but exists only for %g byte-parity; do NOT port (Decision B).
+-- goPortNotes --
+  Mirror submodule decomposition as Go files (one concern each). Keep deferred symbols unexported with
+  `// DEFERRED (Plan 4+):` comments. Bind keystone: smartcrusher.SmartCrusher implements
+  offloads.Crusher. Confirmed seam in worktree .../internal/offloads/offloads.go.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/types.rs   ->   internal/smartcrusher/types.go   fetchedOk= True
+====================================================================================================
+Pure data-type/declaration file. No logic, no markers, no byte-math. Only rules (1) ordered maps and
+(5) seam fidelity apply.
+
+-- publicApi --
+  * CompressionStrategy: type CompressionStrategy int (consts StrategyNone, StrategySkip,
+    StrategyTimeSeries, StrategyClusterSample, StrategyTopN, StrategySmartSample). String() returns
+    parity-pinned lowercase: none/skip/time_series/cluster/top_n/smart_sample.
+  * FieldStats: { Name string; FieldType string; Count int; UniqueCount int; UniqueRatio float64;
+    IsConstant bool; ConstantValue *any; MinVal,MaxVal,MeanVal,Variance *float64; ChangePoints []int;
+    AvgLength *float64; TopValues []TopValue }  (TopValue = {Value string; Count int}, freq-desc).
+  * CrushabilityAnalysis: { Crushable bool; Confidence float64; Reason string; SignalsPresent,
+    SignalsAbsent []string; HasIDField bool; IDUniqueness float64; AvgStringUniqueness float64;
+    HasScoreField bool; ErrorItemCount,AnomalyCount int }.
+  * SkipAnalysis(reason string, confidence float64) CrushabilityAnalysis — Crushable=false, metrics
+    zeroed, slices EMPTY non-nil.
+  * ArrayAnalysis: { ItemCount int; FieldStats *orderedmap.OrderedMap; DetectedPattern string;
+    RecommendedStrategy CompressionStrategy; ConstantFields *orderedmap.OrderedMap;
+    EstimatedReduction float64; Crushability *CrushabilityAnalysis }.
+  * CompressionPlan: { Strategy CompressionStrategy; KeepIndices []int;
+    ConstantFields *orderedmap.OrderedMap; SummaryRanges []SummaryRange (={Start,End int; Summary any});
+    ClusterField,SortField *string; KeepCount int }.
+  * DefaultCompressionPlan() — Strategy=StrategyNone, empties, nil cluster/sort, KeepCount=10 (pinned).
+  * CrushResult (INTERNAL): { Compressed string; Original string; WasModified bool; Strategy string }.
+  * PassthroughResult(content string) CrushResult — Compressed=Original=content, WasModified=false,
+    Strategy="passthrough".
+
+-- constants --  (see consolidated table: as_str strings, KeepCount=10, field_type/detected_pattern domains)
+-- markers --  n/a.
+-- mvp/deferred --  All shapes MVP. Active strategies None/Skip/SmartSample. TimeSeries/ClusterSample/
+  TopN variants defined-but-unassigned. SummaryRanges/ClusterField/SortField empty/nil in MVP.
+-- edgeCases --
+  - Enum string ClusterSample="cluster" (NOT "cluster_sample"), TopN="top_n" — easy to mis-type.
+  - Option<T> -> Go pointers; do NOT collapse 'absent'(nil) vs 'zero'(&0.0). ConstantValue=*any.
+  - Vec::new() -> empty non-nil slices (JSON [] not null if serialized).
+  - TWO CrushResult shapes; do NOT unify (seam stays narrow per zero-blast-radius).
+  - Crushability is *CrushabilityAnalysis (may be nil before analysis).
+-- goPortNotes --
+  BTreeMap (sorted) vs Python dict (parse-order): pick orderedmap insertion/parse order (Python-
+  fidelity), document; switch to sorted only if an analyzer step proves order-sensitive. as_str
+  strings ARE byte-pinned (identifiers) — Decision B does NOT relax them. Drop PyO3/from_dict framing.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/config.rs   ->   internal/smartcrusher/config.go   fetchedOk= True
+====================================================================================================
+Pure config: Config struct + DefaultConfig() + defaults test. No logic, no markers, no regexes.
+CRITICAL: lossless gate in config.rs = 0.15 (upstream LOWERED from 0.30). PLAN-3 MVP uses 0.30 as the
+effective gate default (see HEADER conflict resolution); keep it a Config field so tests override.
+NO MAX_DEPTH here (lives in walker/analyzer).
+
+-- publicApi --
+  * Config: { Enabled bool; MinItemsToAnalyze int; MinTokensToCrush int; VarianceThreshold float64;
+    UniquenessThreshold float64; SimilarityThreshold float64; MaxItemsAfterCrush int;
+    PreserveChangePoints bool; FactorOutConstants bool; IncludeSummaries bool; UseFeedbackHints bool;
+    ToinConfidenceThreshold float64; DedupIdenticalItems bool; FirstFraction float64;
+    LastFraction float64; RelevanceThreshold float64; LosslessMinSavingsRatio float64;
+    EnableCCRMarker bool; CompactionCoreFieldFraction float64; CompactionHeterogeneousCoreRatio float64;
+    CompactionMaxFlattenInnerKeys int; CompactionMinBuckets int; CompactionMaxBuckets int }.
+    SCHEMA-PRESERVING: output contains only items from the original array.
+  * DefaultConfig() Config — canonical defaults (see consolidated table).
+
+-- constants -- (full list in consolidated table; key ones)
+  enabled=true; min_items_to_analyze=5; min_tokens_to_crush=200; variance_threshold=2.0;
+  uniqueness_threshold=0.1; similarity_threshold=0.8; max_items_after_crush=15;
+  preserve_change_points=true[DEFERRED consumer]; factor_out_constants=false; include_summaries=false
+  [DEFERRED]; use_feedback_hints=true[DEFERRED]; toin_confidence_threshold=0.5[DEFERRED];
+  dedup_identical_items=true; first_fraction=0.3; last_fraction=0.15; relevance_threshold=0.3;
+  lossless_min_savings_ratio=0.15 (config) / 0.30 (MVP effective); enable_ccr_marker=true;
+  compaction_core_field_fraction=0.8; compaction_heterogeneous_core_ratio=0.6[DEFERRED];
+  compaction_max_flatten_inner_keys=6; compaction_min_buckets=2[DEFERRED];
+  compaction_max_buckets=8[DEFERRED].
+
+-- algorithm --
+  Data only. Savings-gate contract (USED in crush_array): savings = 1 - len(rendered)/len(input)
+  (BYTES); if savings < LosslessMinSavingsRatio fall through to lossy. CCR-marker-gate contract: if
+  EnableCCRMarker false, lossy path emits NEITHER marker NOR store write; must NOT gate walker opaque
+  substitution. Mirror a defaults-match test.
+
+-- markers --  n/a (holds enable_ccr_marker gate only).
+-- mvp/deferred --  struct + DefaultConfig + test MVP. DEFERRED-consumer fields defined for parity.
+-- edgeCases --
+  - lossless ratio extremes: 0.0 = always prefer lossless; 1.0 = effectively disable. Comparison must
+    be `savings < threshold => fall through` (0.0 never falls through; 1.0 always does since rendered
+    non-empty so savings<1.0).
+  - enable_ccr_marker=false suppresses BOTH marker text AND store write in lossy; NOT walker opaque.
+  - usize -> int; floats plain f64 (no formatting quirks at config layer).
+-- goPortNotes --
+  usize->int (5 count fields), f64->float64, bool->bool. No Default trait: func DefaultConfig() Config
+  (value). Savings math byte len. NO MAX_DEPTH here. Mirror defaults_match_python as TestDefaultConfig.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/traits.rs   ->   internal/smartcrusher/traits.go   fetchedOk= True
+====================================================================================================
+Extension-surface: Constraint + Observer traits, CrushEvent struct, Scorer re-export. The heavy MVP
+machinery does NOT live here. Constraint (+ OSS defaults) is the MVP-relevant piece; Scorer already
+ported (internal relevance base.go:34); Observer/CrushEvent are deferrable telemetry.
+
+-- publicApi --
+  * Constraint: interface { Name() string; MustKeep(items []*orderedmap.OrderedMap, itemStrings []string) []int }.
+    MustKeep returns in-bounds indices the allocator MUST keep (union across constraints). itemStrings
+    optional pre-serialized JSON (nil when absent). Out-of-bounds silently dropped; idempotent; O(n).
+  * CrushEvent: { Strategy string; InputBytes int; OutputBytes int; ElapsedNs uint64; WasModified bool }.
+    Bytes are BYTE lengths (Go len). usize->int, u64->uint64.
+  * Observer: interface { Name() string; OnEvent(event *CrushEvent) }. Called once per top-level Crush,
+    synchronously, after result, before return; stack in add-order; MUST NOT panic.
+  * Scorer = relevance.Scorer (re-export/alias; already exists).
+
+-- constants --  none.
+-- markers --  n/a.
+-- mvp/deferred --  Constraint MVP (spec 8.5 error/outlier/anchor preservation). Scorer MVP (alias).
+  Observer + CrushEvent DEFERRED telemetry (seam carries no observer wiring; omit/stub OK).
+-- edgeCases --
+  - MustKeep on empty items -> empty slice. Never return out-of-bounds. itemStrings nil when absent.
+  - OnEvent must not panic; catch I/O internally. Fire in add-order.
+  - CrushEvent byte fields are BYTE lengths.
+  - Rust Send+Sync has no Go equivalent — drop, comment shared impls must be goroutine-safe.
+  - Observer Name has no Go default — require per-impl.
+-- goPortNotes --
+  Item type serde_json::Value -> *orderedmap.OrderedMap (rule 1). Do NOT redefine Scorer; alias or
+  import relevance. Decision B irrelevant (no float formatting). Constraint/Observer/CrushEvent/Scorer
+  stay internal to smartcrusher (not part of the seam).
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/builder.rs   ->   internal/smartcrusher/builder.go   fetchedOk= True
+====================================================================================================
+Composition/config-wiring: a consuming fluent builder, zero compression logic, no markers, no
+byte-math. Assembles 7 fields; Build() wires into SmartCrusher.from_parts. NewSmartCrusherBuilder
+starts EMPTY (no silent fallback); Build() only defaults scorer to HybridScorer.
+
+-- publicApi --
+  * SmartCrusherBuilder struct { config SmartCrusherConfig; anchorConfig *AnchorConfig;
+    scorer RelevanceScorer; constraints []Constraint; observers []Observer;
+    compaction *CompactionStage; ccrStore ccr.Store }.
+  * NewSmartCrusherBuilder(config) *SmartCrusherBuilder — EMPTY (no scorer/constraints/observers/
+    compaction/store). Store config by value.
+  * AnchorConfig(cfg) — set anchorConfig=&cfg.
+  * WithScorer(scorer) — enterprise plug-in point; Build() falls back to HybridScorer if unset.
+  * AddConstraint(c) — APPEND (stack; union; order preserved for observer determinism).
+  * AddDefaultOSSConstraints() — APPEND [KeepErrorsConstraint('keep_errors'),
+    KeepStructuralOutliersConstraint('keep_structural_outliers')] in THAT order. Composes (never replaces).
+  * AddObserver(o) — APPEND (stack; fire in registration order).
+  * WithDefaultOSSSetup() — WithScorer(HybridScorer) THEN AddDefaultOSSConstraints() THEN
+    AddObserver(TracingObserver). == SmartCrusher.new(config).
+  * WithCompaction(stage) — set compaction=&stage (run before lossy; non-Untouched -> compacted).
+  * WithDefaultCompaction() — CompactionStage.default_csv_schema().
+  * WithCCRStore(store) — set ccrStore=store.
+  * WithDefaultCCRStore() — in-memory store 1000 entries / 5-min TTL (reuse ccr.FromConfig
+    Kind=InMemory; defaults already match).
+  * Build() — (1) analyzer=NewSmartAnalyzer(config copy); (2) anchorSelector=NewAnchorSelector(
+    anchorConfig or default); (3) scorer default HybridScorer if unset; (4) SmartCrusher.from_parts(
+    config, anchorSelector, scorer, analyzer, constraints, observers, compaction, ccrStore).
+
+-- constants --
+  default OSS constraint names ["keep_errors","keep_structural_outliers"]; count=2; observer count=1;
+  events per crush per observer=1; default store cap=1000; default TTL=5min.
+  FACTORY (in crusher.go, pinned here): SmartCrusher.new(config) ==
+    NewSmartCrusherBuilder(config).WithDefaultOSSSetup().Build()
+    = HybridScorer + KeepErrors + KeepStructuralOutliers + TracingObserver.
+
+-- markers --  n/a (wires optional ccr.Store dependency only).
+-- mvp/deferred --  All setters MVP (needed for SmartCrusher.new OSS-default composition). DEFERRED:
+  the extensibility surface (custom enterprise scorers/constraints/observers/compaction stages) — wire
+  setters but only OSS-default concrete impls ship in MVP.
+-- edgeCases --
+  - Empty builder builds a working crusher: scorer -> HybridScorer, but constraints AND observers stay
+    EMPTY (test pins is_empty).
+  - Scorer fallback in Build() not New(). Both default paths use identical HybridScorer default.
+  - config CLONED for analyzer; deep-copy slice/map fields so analyzer doesn't alias crusher.
+  - AnchorConfig default when nil (unwrap_or_default -> DefaultAnchorConfig()).
+  - AddDefaultOSSConstraints + AddConstraint COMPOSE (union, never overwrite). Order preserved.
+-- goPortNotes --
+  No compression logic/markers/float-math here. Consuming-builder (mut self->Self) -> pointer-receiver
+  chaining returning *SmartCrusherBuilder. Box<dyn RelevanceScorer> -> scorer RelevanceScorer field;
+  Box<dyn Constraint> -> Constraint interface, Vec -> []Constraint; Box<dyn Observer> -> []Observer;
+  Arc<dyn CcrStore> -> ccr.Store value. Option<T> -> *AnchorConfig/*CompactionStage or nil interface.
+  WithDefaultCCRStore: wire ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory}); returns (Store,error)
+  but defaults can't fail (non-error helper or document). Tests: empty_builder_builds_with_default_scorer;
+  add_default_oss_constraints_appends_two; add_constraint_preserves_order;
+  with_default_oss_setup_yields_two_constraints_one_observer; builder_observer_fires_on_crush
+  (end-to-end count==1 after crush('[1,2,3]','',1.0)).
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/crusher.rs   ->   internal/smartcrusher/crusher.go   fetchedOk= True
+====================================================================================================
+THE CROWN — top-level SmartCrusher entry + orchestration. MOSTLY MVP. Wires together every other
+module. Heavy callees it INVOKES are DEFERRED (compute_optimal_k, crush_*_array Kneedle, planner
+internals, analyzer full tree internals already MVP elsewhere). Orchestration itself is fully MVP.
+
+-- publicApi --
+  * Crush(content, query string, bias float64) offloads.CrushResult — top entry. JSON-parse;
+    non-JSON passes through (WasModified=false, strategy=passthrough). Recurse processValue at depth 0;
+    re-serialize python_safe_json_dumps (compact ,/: separators, ASCII NOT escaped, key order
+    preserved). WasModified = (result != strings.TrimSpace(content)). Strategy = info or "passthrough".
+    At seam map crushed->Compressed, was_modified->WasModified (strategy dropped).
+  * smartCrushContent(content, queryContext string, bias float64) (crushed string, wasModified bool,
+    info string) — JSON-parse (orderedmap decoder); parse error -> (content,false,""). Else
+    processValue(parsed,0,...), serialize pythonSafeJSONDumps, wasModified = result != TrimSpace(content).
+  * processValue(value any, depth int, queryContext string, bias float64) (processed any, info string)
+    — recursive walker. depth>=50 -> (value,""). Dispatch Array/Object/String/scalar.
+  * processString(s string, depth int, queryContext string, bias float64) (processed any, info string).
+  * crushArray(items []any, queryContext string, bias float64) CrushArrayResult — 3-tier funnel.
+  * crushMixedArray(items []any, queryContext string, bias float64) (crushed []any, strategy string)
+    — DEFERRED for MVP.
+  * executePlan(plan *CompressionPlan, items []any) []any — sort keep_indices ascending, filter
+    idx<len, clone kept in sorted order; factor_out_constants gate (default off).
+  * CrushArrayResult struct { Items []any; StrategyInfo string; CcrHash *string; DroppedSummary string;
+    Compacted *string; CompactionKind *string }.
+
+-- constants --
+  MAX_PROCESS_DEPTH=50; lossless_min_savings_ratio default 0.30 (MVP; config.rs says 0.15);
+  max_items_after_crush default 15; compute_optimal_k min_k=3; mixed passthrough threshold=8;
+  hash prefix 6 bytes -> 12 hex chars; estimate_array_bytes = sum(len(item_str)) + (n-1 saturating) + 2;
+  min_items_to_analyze (config, =5); enable_ccr_marker default true; factor_out_constants default false;
+  variance_threshold (mixed only, DEFERRED).
+
+-- algorithm --
+  CRUSH: smartCrushContent(content,query,bias) -> (compressed,wasModified,info). strategy = info or
+    "passthrough". (Observer firing OPTIONAL — omit MVP.) Map at seam.
+  SMARTCRUSHCONTENT: parse ordered JSON; parse fail -> (content,false,""). Else (crushed,info)=
+    processValue(parsed,0,query,bias); result=pythonSafeJSONDumps(crushed) [compact ,/: ; ASCII not
+    escaped; preserve key insertion order]; wasModified = result != TrimSpace(content).
+  PROCESSVALUE: depth>=50 -> (value,""). infoParts:=[]. Switch JSON kind:
+   - Array: n=len. If n>=min_items_to_analyze: classify via classifyArray(arr).
+       DictArray: r=crushArray(...); if r.Compacted!=nil -> push "<strategy>(n->len=<len(rendered)>)"
+         and RETURN (StringValue(rendered), joined); else push "<strategy>(n-><len(r.Items)>)",
+         items=r.Items, and if r.DroppedSummary!="" append element {"_ccr_dropped":r.DroppedSummary}
+         (ordered map object), RETURN (Array(items), joined).
+       StringArray: crushStringArray -> push "<strategy>(n-><crushed_len>)", RETURN strings.
+       NumberArray: crushNumberArray -> push same, RETURN.
+       MixedArray: crushMixedArray -> push same, RETURN (DEFERRED).
+       NestedArray/BoolArray/Empty: fall through to recursion.
+     Array recursion (below threshold / non-crushable): for each item (p,pInfo)=processValue(item,
+       depth+1,...); collect; append pInfo if non-empty. RETURN (Array(processed), join(parts, ",")).
+   - Object: FIRST PASS recurse each (k,v) in insertion order; set processed[k]=pVal; append pInfo.
+       SECOND PASS: if len(processed)>=min_items_to_analyze: (crushedDict,strategy)=crushObject(...);
+       if strategy != "object:passthrough" -> push strategy, RETURN (Object(crushedDict), joined).
+       Else RETURN (Object(processed), joined). [crushObject DEFERRED/sibling.]
+   - String: processString(s, depth, query, bias). Other scalar: RETURN (value, "").
+  PROCESSSTRING:
+   (1) if tryParseJSONContainer(s) -> parsed object/array: (processed,subInfo)=processValue(parsed,
+       depth+1,...). If processed != parsed: rendered = (processed is string ? that string :
+       compact-serialize(processed)); info = subInfo=="" ? "string_json" : "string_json["+subInfo+"]";
+       RETURN (StringValue(rendered), info).
+   (2) else if classifyCell(StringValue(s), defaultClassifyConfig)==Opaque(kind): marker=
+       emitOpaqueCcrMarker(s, kind, ccrStore) [COMMA-FORM]; RETURN (StringValue(marker),
+       "string_ccr:"+kindLabel(kind)).
+   (3) else RETURN (StringValue(s), "").
+  CRUSHARRAY:
+   step1: itemStrings=[serdeJSON(item)] (compact); itemStrRefs=[]string.
+   step2: maxK=(config.max_items_after_crush>0 ? &config.max_items_after_crush : nil); adaptiveK=
+     computeOptimalK(itemStrRefs, bias, 3, maxK) [heavy internals DEFERRED — MVP simplified k].
+   Tier-1: if len(items)<=adaptiveK -> RETURN {Items:copy(items), StrategyInfo:"none:adaptive_at_limit",
+     CcrHash:nil, DroppedSummary:"", Compacted:nil, CompactionKind:nil}.
+   Tier-2 lossless: if compaction stage present: (c,rendered)=stage.run(items). if c.wasCompacted():
+     inputBytes=estimateArrayBytes(itemStrings); savingsRatio = inputBytes>0 ? 1.0 -
+     float64(len(rendered))/float64(inputBytes) : 0.0; if savingsRatio>=config.lossless_min_savings_ratio:
+     kind=compactionKindStr(c); RETURN {Items:copy(items), StrategyInfo:"lossless:"+kind, CcrHash:nil,
+     DroppedSummary:"", Compacted:&rendered, CompactionKind:&kind}.
+   Tier-3 lossy: effectiveMaxItems=adaptiveK. analysis=analyzer.analyzeArray(items). If
+     recommended_strategy==Skip: reason = analysis.crushability!=nil ? "skip:"+crushability.reason : "";
+     RETURN {Items:copy(items), StrategyInfo:reason, ...all nil...}.
+   plan+execute: plan=planner.createPlan(analysis, items, queryContext, preserveFields=nil,
+     &effectiveMaxItems, &itemStrings). result=executePlan(plan, items).
+   CCR marker: droppedCount = saturating_sub(len(items),len(result)). If droppedCount>0 AND
+     config.enable_ccr_marker: canonical=serdeJSON(items) (serialize the slice once); h=hashCanonical(
+     canonical) [SHA-256 first 6 bytes -> 12 hex]; marker=fmt.Sprintf("<<ccr:%s %d_rows_offloaded>>",
+     h, droppedCount) [SPACE-FORM]; if ccrStore!=nil: ccrStore.Put(h, canonical). ccrHash=&h,
+     droppedSummary=marker. Else ccrHash=nil, droppedSummary="".
+   return lossy: RETURN {Items:result, StrategyInfo:analysis.recommended_strategy.asStr(),
+     CcrHash:ccrHash, DroppedSummary:droppedSummary, Compacted:nil, CompactionKind:nil}.
+  EXECUTEPLAN: indices=copy(plan.keep_indices); sort ascending; kept=[clone(items[idx]) for idx in
+   indices if idx<len]. If config.factor_out_constants && len(constant_fields)>0 && len(kept)>=2:
+   for each kept object, for each (key,constant) in constant_fields (BTreeMap=sorted-key): if
+   obj.get(key)==constant remove key (anyStripped=true). If anyStripped: prepend {"_constant_fields":
+   {...}} at index 0. RETURN kept.
+  CRUSHMIXEDARRAY (DEFERRED): n<=8 -> (copy,"mixed:passthrough"); else group by type preserving first-
+   occurrence + indices; crush big groups; reassemble via sorted index set; strategy
+   "mixed:adaptive(n->kept,<parts>)". Number-group outliers |num-mean|>variance_threshold*stdev.
+
+-- markers --
+  SPACE-FORM (emitted here): fmt.Sprintf("<<ccr:%s %d_rows_offloaded>>", hash12, droppedCount).
+  COMMA-FORM (via emitOpaqueCcrMarker in processString, from compaction): "<<ccr:HASH,KIND,SIZE>>".
+  CANONICAL <<ccr:HASH>> NOT emitted here. Sentinels: {"_ccr_dropped":"<<ccr:...>>"} (last element),
+  {"_constant_fields":{...}} (prepended).
+
+-- mvp/deferred --  Overwhelmingly MVP. DEFERRED: crushMixedArray entirely + heavy callees
+  (computeOptimalK, crushStringArray/crushNumberArray/crushObject Kneedle, planner.createPlan
+  internals already MVP-shared, buckets compaction). TOIN/feedback/telemetry stubbed-disabled.
+  factor_out_constants gate ported, default off.
+
+-- edgeCases --
+  - Non-JSON -> (content,false,"") passthrough; WasModified=false, strategy="passthrough". Scalar JSON
+    ("42") round-trips unchanged.
+  - was_modified compares vs strings.TrimSpace(content) NOT raw. Compact re-serialization means
+    `[1, 2, 3]` -> `[1,2,3]` IS modified; already-compact `[1,2,3]` is NOT.
+  - Tier-1 boundary inclusive (items.len() <= adaptive_k). adaptive_k can exceed cap only if
+    max_items_after_crush==0.
+  - savings_ratio guards inputBytes>0 (else 0.0); estimate uses saturating_sub for n-1.
+  - Lossless win: NOTHING dropped, Items=full original copy, ccr_hash nil. Only Compacted string is the
+    compressed view (substituted as Value::String by processValue).
+  - droppedCount saturating_sub — if plan keeps MORE than input, count=0, no marker.
+  - enable_ccr_marker=false: rows STILL drop but ccr_hash=nil, dropped_summary="", NO store write.
+  - processString re-emit: if recursion returns Value::String (lossless substitution) use it DIRECTLY —
+    do NOT JSON-re-encode (double-quote). Only non-string results get compact-serialized.
+  - try_parse_json_container only matches objects/arrays: bare scalars ("123"), bare quoted strings,
+    malformed JSON -> None -> plain/opaque string.
+  - factor_out_constants strip is DEFENSIVE: only removes a key when value EQUALS recorded constant;
+    drifted values kept. Requires kept>=2 + constant_fields non-empty; only prepends sentinel if at
+    least one key stripped. Iterate constant_fields in sorted-key (BTreeMap) order.
+  - Object second-pass crush only when crushObject returns strategy != "object:passthrough".
+  - Empty info strings never appended; final info = parts joined with ",".
+  - skip path: strategy="skip:<reason>" only if crushability Some; if None strategy_info is EMPTY.
+-- goPortNotes --
+  orderedmap for ALL objects. len() bytes (estimate_array_bytes, savings_ratio, "len=%d"). THREE marker
+  builders separate (space-form inline here; comma-form via shared compaction helper). hashCanonical:
+  SHA-256 first 6 bytes lowercase hex -> 12 chars; over canonical serialized BYTES of the slice;
+  Decision B = pick one stable Go serializer, hash consistently (cache key, not cross-lang identical).
+  Observer/CrushEvent OPTIONAL — omit. process_value returns 2-tuple (value,info). executePlan deep-
+  copies objects it mutates; Rust hashes ORIGINAL items before plan mutates clones (store payload =
+  untouched original). crushMixedArray stub to passthrough until heterogeneous lands. maxK as *int
+  (nil when max_items_after_crush==0).
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/analyzer.rs   ->   internal/smartcrusher/analyzer.go   fetchedOk= True
+====================================================================================================
+MVP-core statistical 'brain': stateless SmartAnalyzer{config}, 8 methods deciding WHETHER and HOW to
+crush. Emits NO output text / NO CCR markers. The crushability decision tree is the heart (fully MVP).
+SORTED key iteration EVERYWHERE (Go map range order BANNED). The prompt's "0.30 savings gate" is
+actually config.lossless_min_savings_ratio and lives OUTSIDE this file.
+
+-- publicApi --
+  * NewSmartAnalyzer(config SmartCrusherConfig) *SmartAnalyzer.
+  * AnalyzeArray(items []*orderedmap.OrderedMap /* or []Value */) ArrayAnalysis — top entry. Guards
+    empty/non-object-first -> None strategy, nil Crushability.
+  * AnalyzeField(key string, items []Value) FieldStats — incl. overflow parity reset (variance=0.0,
+    others nil).
+  * DetectChangePoints(values []float64, window int) []int — window=5 from AnalyzeField; deduped
+    ascending; empty if len<window*2 or stdev<=0.
+  * DetectPattern(fieldStats, items) string — time_series|logs|search_results|generic.
+  * DetectTemporalField(fieldStats, items) bool.
+  * AnalyzeCrushability(items, fieldStats) CrushabilityAnalysis — THE decision tree (6 ordered cases).
+  * SelectStrategy(fieldStats, pattern, itemCount, crushability) CompressionStrategy.
+  * EstimateReduction(fieldStats, strategy, itemCount) float64 — itemCount unused; [0,0.95].
+
+-- constants -- (see consolidated table for all gates/confidences)
+  config.min_items_to_analyze=5; config.variance_threshold=2.0; change_point window=5; top_values=5;
+  temporal sample=10; id_confidence gate=0.7; score conf gate (pattern)=0.5; CASE0 non_id<0.1;
+  CASE1 max_uniqueness<0.3; CASE2/3 max_uniqueness>0.8; logs message>0.5/avg>20; logs level<0.1/[2,10];
+  unix_seconds [1e9,2e9]; unix_millis [1e12,2e12]; reduction bases (TS0.7/CS0.8/TN0.6/SS0.5/0.3);
+  bonus +constant_ratio*0.2 cap 0.95; confidences CASE0..5 = 0.85/0.9/0.85/0.7/0.6/0.5.
+
+-- algorithm --
+  AnalyzeArray:
+   (a) first_is_dict = items non-empty AND items[0] is object. If NOT -> zeroish ArrayAnalysis:
+       item_count=len, empty field_stats, detected_pattern="generic", recommended_strategy=None,
+       empty constant_fields, estimated_reduction=0.0, crushability=nil. (covers empty too)
+   (b) all_keys = sorted union of every key across all items (sorted set, ASCII order). field_stats =
+       ordered map sorted: field_stats[key]=analyze_field(key, items).
+   (c) pattern = detect_pattern(field_stats, items).
+   (d) constant_fields = ordered map sorted: for each (k,v) if v.is_constant AND v.constant_value!=nil
+       add (k -> constant_value).
+   (e) crushability = analyze_crushability(items, field_stats).
+   (f) strategy = select_strategy(field_stats, pattern, len(items), &crushability).
+   (g) reduction = (strategy==Skip ? 0.0 : estimate_reduction(field_stats, strategy, len(items))).
+   (h) return ArrayAnalysis{...}.
+  AnalyzeField(key, items):
+   (a) values = for each object item, obj.get(key) cloned; missing-or-null both -> JSON null.
+   (b) non_null = values minus nulls.
+   (c) If non_null empty: FieldStats{field_type="null", count=len(values), unique_count=0,
+       unique_ratio=0.0, is_constant=true, constant_value=nil, numeric/string nil/empty}.
+   (d) field_type from non_null[0] runtime type: Bool->boolean, Number->numeric, String->string,
+       Object->object, Array->array, else unknown. (Bool checked BEFORE Number.)
+   (e) Uniqueness: stringify ALL values (incl nulls) via python_repr, collect set, unique_count=size.
+       unique_ratio = (len(values)==0 ? 0.0 : unique_count/len(values)). is_constant=(unique_count==1).
+       constant_value = (is_constant ? clone non_null[0] : nil).
+   (f) numeric: nums=non_null as f64 keeping FINITE only. If non-empty: min/max reduce; mean=mean(nums);
+       variance=(len>1 ? sample_variance : 0.0). all_finite = mean,variance,min,max present+finite. If
+       all_finite: set min/max/mean/variance + change_points=detect_change_points(nums,5). ELSE
+       (overflow reset): min/max/mean=nil, variance=0.0 (NOT nil), change_points=empty.
+   (g) string: strs=non_null as strings. If non-empty: avg_length=mean of per-string CHAR counts
+       (chars().count()); top_values=top_n_by_count(strs,5).
+  DetectChangePoints(values, window=5):
+   (a) len<window*2 (<10) -> empty. (b) overall_std=sample_stdev; nil or <=0 -> empty.
+   (c) threshold=variance_threshold(2.0)*overall_std. (d) i in window..len-window (saturating):
+       before=mean(values[i-5:i]) (default 0), after=mean(values[i:i+5]) (default 0); if
+       abs(after-before)>threshold append i. (e) raw empty -> empty. (f) greedy dedup: deduped=[raw[0]];
+       for cp in raw[1:]: if cp-last>window append. Return deduped.
+  DetectPattern:
+   (a) has_timestamp=detect_temporal_field. (b) has_numeric_with_variance = any numeric var>0.0.
+   (c) both -> "time_series". (d) string fields: message_like if uniq>0.5 AND avg_length>20.0; else
+       level_like if uniq<0.1 AND unique_count in [2,10]. both flags -> "logs". (e) sorted: (is_score,
+       confidence)=detect_score_field_statistically; if is_score AND conf>=0.5 -> "search_results".
+       (f) else "generic".
+  DetectTemporalField:
+   (a) sorted. string fields: sample=first 10 items' string value; iso_count=count matching
+       is_iso_datetime OR is_iso_date; if iso_count/len>0.5 -> true. (b) numeric: if min_val,max_val
+       present: mn in [1e9,2e9] OR [1e12,2e12] -> true (ONLY min_val range-checked). (c) else false.
+  AnalyzeCrushability (THE DECISION TREE):
+   STEP1 ID (best/highest-conf): iterate sorted; (is_id,confidence)=detect_id_field_statistically;
+     track highest confidence; id_field_name, id_uniqueness, id_confidence. has_id_field=(name set AND
+     id_confidence>=0.7).
+   STEP2 score (first match): first field where detect_score_field_statistically.is_score true ->
+     has_score_field=true, append "score_field:{name}(conf={confidence:.2})", BREAK. else absent
+     "score_field". (NO confidence gate here, unlike detect_pattern.)
+   STEP3 outliers: outlier_indices=detect_structural_outliers; if>0 present "structural_outliers:{count}"
+     else absent.
+   STEP3b error fallback: error_keyword_indices=detect_error_items_for_preservation(items,nil); if
+     keyword_error_count>0 AND structural_outlier_count==0 present "error_keywords:{count}".
+     error_count=max(structural,keyword).
+   STEP4 anomalies: for each numeric field with mean_val+variance present AND variance>0: std=sqrt;
+     if std<=0 skip; threshold=variance_threshold*std; for each i: obj has field AND value parses f64
+     (num) AND !NaN AND abs(num-mean)>threshold -> add i. anomaly_count=len. present/absent "anomalies".
+   STEP5 uniqueness aggregates: string_ratios=uniq of string fields EXCEPT id_field; avg_string_
+     uniqueness=(empty?0:mean). non_id_numeric_ratios likewise. max_uniqueness=max(avg_string,
+     id_uniqueness,0.0). non_id_content_uniqueness=max(avg_string,avg_non_id_numeric).
+   STEP6 change points: has_change_points = any numeric field with non-empty change_points; if true
+     append "change_points". has_any_signal = signals_present non-empty.
+   DECISION (first match wins; all carry has_id_field/id_uniqueness/avg_string_uniqueness/
+   has_score_field/error_item_count=error_count/anomaly_count + signal lists):
+     CASE0: non_id_content_uniqueness<0.1 AND has_id_field -> crushable, conf 0.85,
+            reason "repetitive_content_with_ids", append "repetitive_content".
+     CASE1: max_uniqueness<0.3 -> crushable, conf 0.9, "low_uniqueness_safe_to_sample".
+     CASE2: has_id_field AND max_uniqueness>0.8 AND NOT has_any_signal -> NOT crushable, conf 0.85,
+            "unique_entities_no_signal".
+     CASE3: max_uniqueness>0.8 AND has_any_signal -> crushable, conf 0.7, "unique_entities_with_signal".
+     CASE4: NOT has_any_signal -> NOT crushable, conf 0.6, "medium_uniqueness_no_signal".
+     CASE5 (fallthrough): crushable, conf 0.5, "medium_uniqueness_with_signal".
+  SelectStrategy:
+   (a) item_count<min_items_to_analyze(5) -> None. (b) crushability provided AND !crushable -> Skip.
+   (c) pattern=="time_series" AND any numeric change_points -> TimeSeries. (d) pattern=="logs": first
+       field (sorted) whose lowercased key contains "message"; if found AND uniq<0.5 -> ClusterSample.
+   (e) pattern=="search_results" -> TopN. (f) else SmartSample.
+  EstimateReduction:
+   (a) None -> 0.0. field_stats empty -> 0.0. (b) constant_ratio = #constant / len. (c) base by strategy
+       (TS0.7/CS0.8/TN0.6/SS0.5/0.3). (d) return min(base + constant_ratio*0.2, 0.95).
+  HELPERS: python_repr (cardinality counting only): Null->"None"; true->"True"; false->"False";
+   Number->string; String->raw; Object/Array->JSON. top_n_by_count: count, sort count DESC ties
+   first-occurrence (stable), up to n. is_iso_datetime: byte-position, len>=19, \d{4}-\d{2}-\d{2}
+   [T or space]\d{2}:\d{2}:\d{2} on bytes 0..18 (trailing ignored). is_iso_date: len EXACTLY 10,
+   \d{4}-\d{2}-\d{2}. is_digit: ASCII 0-9.
+
+-- markers --  n/a (verdicts only).
+-- mvp/deferred --  Overwhelmingly MVP. select_strategy CAN return TimeSeries/ClusterSample/TopN but
+  those crushers DEFERRED; analyzer still must compute them (seam correct); downstream falls back to
+  SmartSample/lossless. The enum variants exist; their crushers out of scope.
+-- edgeCases --
+  - Empty array OR first item not object -> None strategy, nil crushability, generic pattern (NOT Skip).
+    Only place crushability is nil.
+  - All-null field: field_type="null", is_constant=true, unique_count=0, unique_ratio=0.0.
+  - Missing key vs explicit null BOTH map to null; unique-count includes nulls (python_repr -> "None").
+  - Numeric variance n<2 -> 0.0 (Some(0.0)) NOT nil.
+  - Numeric overflow/non-finite -> ALL-OR-NOTHING reset: min/max/mean nil, variance 0.0 (NOT nil),
+    change_points empty. Replicate variance=0.0 detail.
+  - change_points needs len>=10 AND overall_std>0.0; constant series -> empty. Two-segment step may NOT
+    trigger (diff ~2sigma == threshold, strict >); three-segment does.
+  - detect_temporal numeric path checks ONLY min_val (max must merely be present). 0 min_val excluded.
+  - is_iso_datetime ignores trailing after byte 18 (".123Z" matches); is_iso_date EXACTLY len 10.
+  - STEP2 score has NO confidence gate; detect_pattern's score check gates conf>=0.5. Don't conflate.
+  - Decision tree order load-bearing: CASE0 precedes CASE1.
+  - avg_length/variance nil treated as 0.0; mean() may return nil -> 0.0/skip.
+  - estimate_reduction empty field_stats -> 0.0 (guards Python ZeroDivisionError).
+  - Field iteration MUST be sorted (ASCII) everywhere; Go map range BANNED.
+  - max_uniqueness clamps >=0.0 via .max(0.0).
+  - select_strategy logs branch only fires for key CONTAINING "message" (case-insensitive), uniq<0.5;
+    else SmartSample even when pattern==logs.
+-- goPortNotes --
+  orderedmap for items + field_stats; iterate ASCII-sorted KEYS (replicate BTreeMap). avg_length uses
+  rune count (utf8.RuneCountInString CORRECT here). Decision B: don't byte-match {:.2} conf formatting
+  (diagnostic). python_repr Number: use original JSON token (json.Number) to avoid drift. top_n tie-
+  break first-occurrence stable sort (no map ordering). detect_change_points saturating subtraction.
+  Numeric finite filter: drop !IsInf && !IsNaN survivors; FieldStats numeric *float64 (nil vs 0.0).
+  Only variance_threshold(2.0) + min_items_to_analyze(5) used here. Deps (port first):
+  detect_id_field_statistically/detect_score_field_statistically (field_detect.go),
+  detect_structural_outliers/detect_error_items_for_preservation (outliers.go; latter called with nil
+  2nd arg). select_strategy logs: strings.Contains(strings.ToLower(k),"message"), first sorted match,
+  uniq<0.5. Seam unchanged; analyzer is internal helper.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/classifier.rs   ->   internal/smartcrusher/classifier.go   fetchedOk= True
+====================================================================================================
+ALL-MVP leaf: classify_array(items) -> ArrayType + 7-variant enum + as_str(). Pure value classifier,
+NO CCR markers. Routing gate the MVP depends on: a pure-object array (DictArray) -> lossless
+compaction-table path. ONE null among objects -> MixedArray.
+
+-- publicApi --
+  * ArrayType: type ArrayType int (DictArray, StringArray, NumberArray, BoolArray, NestedArray,
+    MixedArray, Empty).
+  * (t ArrayType) AsStr() string — exact lowercase: dict_array/string_array/number_array/bool_array/
+    nested_array/mixed_array/empty.
+  * ClassifyArray(items []any) ArrayType — walks every element (no sampling).
+
+-- constants -- as_str literals (consolidated table).
+-- algorithm --
+  STEP1 empty gate: len==0 -> Empty (only early return).
+  STEP2 single scan: six flags false (has_bool/has_number/has_string/has_object/has_array/has_null).
+   For each item set exactly ONE: bool->has_bool; number(int OR float)->has_number; string->has_string;
+   object->has_object; array->has_array; null->has_null. No early break.
+  STEP3 BoolArray: has_bool AND none of others -> BoolArray.
+  STEP4 DictArray: has_object AND none of others -> DictArray (HOMOGENEOUS-DICT-TABLE gate). One null
+   among objects -> falls through to MixedArray.
+  STEP5 StringArray: has_string AND none of others -> StringArray.
+  STEP6 NumberArray: has_number AND none of others -> NumberArray (explicit has_bool exclusion).
+  STEP7 NestedArray: has_array AND none of others -> NestedArray.
+  STEP8 fallthrough: MixedArray (any heterogeneous mix AND anything containing null; no pure-null gate,
+   so [null,null] -> MixedArray).
+  ROUTING (context): DictArray -> compaction path. StringArray -> crush_string_array (DEFERRED).
+   NumberArray -> number crush (DEFERRED). Classifier only LABELS.
+-- markers --  n/a.
+-- mvp/deferred --  Classifier fully MVP. Only DictArray drives an MVP strategy; other labels'
+  downstream crushers DEFERRED. as_str labels MVP.
+-- edgeCases --
+  - [] -> Empty. [{..},{..}] -> DictArray. [{..},null] -> MixedArray (tested null_in_array_is_mixed).
+  - [true,false,1] -> MixedArray (tested; bool gate fails has_number, number gate fails has_bool).
+  - [{..},"str"] -> MixedArray. [1,2.5,3] -> NumberArray (int/float both has_number). [null,null] ->
+    MixedArray. [[1,2],[3,4]] -> NestedArray.
+-- goPortNotes --
+  Go type switch separates bool from numbers automatically (like Rust serde) — [true,false,1]->Mixed
+  falls out; do NOT special-case bool. null -> nil interface (case nil:). Walk EVERY element, no
+  sampling/break (except len==0). Decode object as orderedmap (NOT map[string]any); be deliberate about
+  concrete types (orderedmap.OrderedMap value vs pointer; float64 vs json.Number). No byte/float
+  concerns (Decision B). Tests: empty->Empty; dict; string; number(int+float); bool; nested; dict+str
+  ->Mixed; bool+number->Mixed; dict+null->Mixed; 7 AsStr literals.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/field_detect.rs   ->   internal/smartcrusher/fielddetect.go   fetchedOk= True
+====================================================================================================
+Self-contained MVP pure-classification: two boolean+confidence detectors labeling columns ID-like /
+score-like. NO CCR markers, NO byte math, NO heavy logic. Confidences are fixed literal sums
+(Decision B: no float-format quirks). Depends on 4 sibling helpers (FieldStats, is_uuid_format,
+calculate_string_entropy, detect_sequential_pattern).
+
+-- publicApi --
+  * DetectIDFieldStatistically(stats FieldStats, values []Value) (isID bool, confidence float64).
+  * DetectScoreFieldStatistically(stats FieldStats, items []Value) (isScore bool, confidence float64).
+
+-- constants -- (full list in consolidated table)
+-- algorithm --
+  detect_id:
+   STEP1 hard gate: if stats.UniqueRatio<0.9 -> (false,0.0).
+   STEP2 string branch (field_type=="string"): sample = first up-to-20 of values, take(20) THEN
+     filter-is-string (non-string in first 20 consumes a slot, dropped; sample may be <20). If
+     len>0: uuidCount; uuidCount/len>0.8 -> (true,0.95). avgEntropy=sum(entropy)/len; avgEntropy>0.7
+     AND UniqueRatio>0.95 -> (true,0.8).
+   STEP3 numeric branch (field_type=="numeric"): detect_sequential_pattern(values,true) AND
+     UniqueRatio>0.95 -> (true,0.9) (FULL unfiltered values passed). MinVal+MaxVal set: valueRange=
+     max-min; range>0.0 AND UniqueRatio>0.95 -> (true,0.85).
+   STEP4 catch-all: UniqueRatio>0.98 -> (true,0.7).
+   STEP5: (false,0.0).
+  detect_score:
+   STEP1 field_type!="numeric" -> (false,0.0).
+   STEP2 MinVal OR MaxVal unset -> (false,0.0). bind minVal,maxVal.
+   STEP3 confidence=0.0; IF/ELSE-IF chain first match (sets isBounded):
+     [0,1] both -> +0.4; else [0,10] both -> +0.3; else [0,100] both -> +0.25; else (minVal>=-1.0 AND
+     maxVal<=1.0) -> +0.35 (ASYMMETRIC: lower checks minVal only, upper maxVal only — do NOT
+     symmetrize); else NOT bounded.
+   STEP4 if NOT bounded -> (false,0.0).
+   STEP5 sequential rejection: sampleSeq = first up-to-50 items, if object containing stats.Name take
+     value (raw, in order). detect_sequential_pattern(sampleSeq,true) -> (false,0.0).
+   STEP6 descending bonus: valuesInOrder = over ALL items, object containing stats.Name, coerce f64,
+     keep FINITE, in order. if len>=5: numPairs=len-1; descendingCount=count adjacent (w[i]>=w[i+1]);
+     if numPairs>0 AND descendingCount/numPairs>0.7 -> +0.3.
+   STEP7 float-fraction bonus: first20=first up-to-20 of valuesInOrder; floatCount=count v finite AND
+     v!=trunc(v); if len(first20)>0 AND floatCount>len(first20)*0.3 -> +0.1.
+   STEP8 isScore=(confidence>=0.4); boundedConfidence=min(confidence,0.95); return (isScore, bounded).
+-- markers --  n/a.
+-- mvp/deferred --  Entire file MVP. Sibling helpers MVP-shared (statistics.rs/types.rs), separate ports.
+-- edgeCases --
+  - string sample: take(20) BEFORE is-string filter -> sample can be <20. Empty sample -> skip UUID/
+    entropy, fall to catch-all.
+  - numeric sequential branch receives FULL unfiltered values (helper filters).
+  - range branch requires BOTH min+max present AND range>0.0; zero-width (min==max) -> catch-all.
+  - All uniqueness strict: gate <0.9; entropy/sequential/range >0.95; catch-all >0.98.
+  - score range chain first-match-wins; [0,1] over [0,10] over [0,100] over [-1,1].
+  - bucket 3d [-1,1] ASYMMETRIC: (min>=-1) AND (max<=1) only. Preserve.
+  - 3a-3c inclusive containment (0.0..=1.0) both min+max.
+  - sequential rejection samples first 50 by KEY LOOKUP on objects only; missing/non-object skipped.
+  - descending bonus scans ALL items (not 50), drops non-finite, order preserved, requires >=5. Pair
+    test >= (equal adjacent counts as descending).
+  - float-fraction operates on finite floats, first 20, v!=trunc(v); empty-slice guard.
+  - NaN/Inf filtered. Empty items: STEP6 <5 -> no descending; STEP7 first20 empty -> no float bonus.
+-- goPortNotes --
+  NO CCR/byte math. Confidences fixed literal sums (tests assert <1e-9). Object key lookup via ordered-
+  map (NOT map[string]any); define Value as shared smartcrusher JSON type. Number coercion: as_f64
+  semantics (ints+floats yes, strings NO). as_str: only true JSON strings. trunc -> math.Trunc; finite
+  guard !IsInf && !IsNaN. Return (bool,float64) — do NOT collapse into struct. Deps: FieldStats (Name,
+  FieldType, UniqueRatio, MinVal/MaxVal *float64), is_uuid_format, calculate_string_entropy,
+  detect_sequential_pattern.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/statistics.rs   ->   internal/smartcrusher/statistics.go   fetchedOk= True
+====================================================================================================
+Fully-MVP pure-math field-characterization helpers (port of smart_crusher.py:378-481). NOT
+percentiles/SmartSample stats despite the name. NO CCR markers/bytes/orderedmap. KEY subtlety:
+is_uuid_format uses BYTE length; calculate_string_entropy uses RUNE count — opposite by design.
+
+-- publicApi --
+  * IsUUIDFormat(value string) bool — byte len 36, five '-' segments 8-4-4-4-12, all ASCII hex
+    (case-insensitive); no version-bit validation.
+  * CalculateStringEntropy(s string) float64 — normalized Shannon entropy over RUNES, 0.0 for n<2 /
+    all-same.
+  * DetectSequentialPattern(values []<jsonValue>, checkOrder bool) bool — BUG#2 fixed.
+  * pythonIntParse(s string) (int64, bool) [private] — mirrors Python int().
+
+-- constants --
+  UUID_TOTAL_LEN=36; UUID_SEGMENT_COUNT=5; UUID_SEGMENT_LENS=[8,4,4,4,12]; ENTROPY_MIN_LEN=2;
+  ENTROPY_HIGH_HINT=0.7 (caller-side); ENTROPY_LOW_HINT=0.3 (caller-side); SEQ_MIN_VALUES=5;
+  SEQ_DIFF_LO=0.5; SEQ_DIFF_HI=2.0 (inclusive 0.5..=2.0); SEQ_CONSISTENT_FRACTION=0.8 (strict >);
+  SEQ_ASCENDING_FRACTION=0.7 (strict >); SEQ_MIN_PAIRWISE=2.
+
+-- algorithm --
+  is_uuid_format: (1) byte len != 36 -> false. (2) split '-', != 5 parts -> false. (3) expectedLens
+   [8,4,4,4,12]; each part len match AND all ASCII hex. (4) true.
+  calculate_string_entropy: (1) n=rune count. (2) n<2 -> 0.0. (3) freq map[rune]int. (4) length=n;
+   entropy = -sum(p*log2(p)) over counts with p>0. (5) maxEntropy=log2(min(len(freq),n)). (6) if
+   maxEntropy>0.0 return entropy/maxEntropy else 0.0. Char-level (runes correct).
+  python_int_parse(s): (1) TrimSpace. (2) "" -> false. (3) if contains '_': reject if first/last byte
+   '_' OR contains "__"; else strip '_'. (4) ParseInt base10 int64. Accepts +/- and underscores;
+   REJECTS floats/hex/sci/non-numeric.
+  detect_sequential_pattern(values, checkOrder): (1) len<5 -> false. (2) build nums + hadNonString
+   Numeric: NUMBER->append, set hadNonStringNumeric=true; BOOL->skip; STRING s-> if python_int_parse
+   ok append but DON'T set flag; null/array/object->skip. (3) len(nums)<5 -> false. (4) BUG#2 GATE: if
+   !hadNonStringNumeric -> false (all-string numerics = categorical). (5) len(nums)<2 -> false. (6)
+   sortedNums ascending (NaN Equal). (7) diffs consecutive; empty -> false. (8) avgDiff=sum/len; if
+   !(0.5<=avgDiff<=2.0) -> false. (9) consistentCount = diffs in [0.5,2.0]; isSequential =
+   consistentCount/len > 0.8; if !isSequential -> false. (10) if checkOrder: ascendingCount over
+   ORIGINAL nums (nums[i]<=nums[i+1]); nPairs=len-1; isAscending = ascendingCount/nPairs > 0.7; return
+   isAscending. (11) return true.
+-- markers --  n/a.
+-- mvp/deferred --  Entirely MVP. NONE of Kneedle/SimHash/compute_optimal_k/heavy crushers here.
+-- edgeCases --
+  - is_uuid: empty/35/37 -> false; wrong segments/non-hex -> false; lower+UPPER hex accepted; BYTE len.
+  - entropy: empty/single -> 0.0; all-identical -> 0.0 (max_entropy log2(1)=0, guard returns 0.0);
+    "ab" 50/50 -> 1.0. RUNE-level.
+  - python_int_parse: "  5  "->5; "+5"->5; "-5"->-5; "3_000"->3000; "_5"/"5_"/"3__000"->None; "3.14"
+    ->None; no hex/sci.
+  - sequential: <5 -> false; <5 numerics -> false; bools NEVER numeric; BUG#2 all-string -> false; one
+    real number flips flag; avg_diff outside [0.5,2.0] -> false; descending+checkOrder -> false; without
+    checkOrder -> true; float unit-step (1.5,2.5,..) -> true; whitespace-padded numeric strings detected.
+-- goPortNotes --
+  is_uuid_format: Go len (BYTES), NOT RuneCount. entropy: utf8.RuneCountInString / range runes. Value:
+  type-switch JSON number/bool/string; bools SEPARATE Go type (isinstance(bool) exclusion automatic).
+  JSON number: json.Number.Float64() or distinguish bool by type. python_int_parse: TrimSpace +
+  underscore handling + ParseInt base10 int64 (no regex). Decision B irrelevant (no float-to-string).
+  Preserve thresholds + strict(>) vs inclusive([..]) operators. log2 via math.Log2. Sort uses
+  partial_cmp NaN->Equal; ascending check on ORIGINAL unsorted (keep both slices).
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/stats_math.rs   ->   internal/smartcrusher/statsmath.go   fetchedOk= True
+====================================================================================================
+Leaf numeric-statistics mirroring Python `statistics`. NO deps/markers/string-math/seam. mean/
+sample_variance/sample_stdev/median MVP; format_g + normalize_scientific_exp DEFERRED (debug strings,
+not byte-saving path).
+
+-- publicApi --
+  * mean(values []float64) (float64, bool) — empty or non-finite -> ok=false. Sequential L-to-R sum.
+  * sampleVariance(values []float64) (float64, bool) — len>=2 else false; propagate from mean; non-
+    finite -> false; uses (v-mean)*(v-mean) NOT math.Pow.
+  * sampleStdev(values []float64) (float64, bool) — sqrt(sampleVariance); propagate.
+  * median(values []float64) (float64, bool) — empty -> false; sorts a COPY; even=mean of two middles,
+    odd=middle. total-order comparison (total_cmp).
+  * formatG(x float64) string — DEFERRED. ~Python {:.4g}.
+
+-- constants --
+  sample variance denominator = n-1 (Bessel; NOT population n); min variance/stdev=2; min mean/median=1;
+  format_g sig digits=4 (DEFERRED); format_g scientific threshold = exp<-4 || exp>=4 (DEFERRED);
+  scientific mantissa decimals=3; fixed decimals = max(3-exp,0); exponent padding=2.
+
+-- algorithm --
+  mean: len==0 -> (0,false). sum (sequential). m=sum/len. finite -> (m,true) else (0,false).
+  sampleVariance: len<2 -> (0,false). mean; if !ok propagate. sumSqDiff=sum((v-m)*(v-m)). var=
+   sumSqDiff/(len-1). finite -> (var,true) else (0,false).
+  sampleStdev: sampleVariance; if !ok (0,false); else (math.Sqrt(variance),true). No extra finite
+   re-check (sqrt of finite non-negative variance is finite).
+  median: len==0 -> (0,false). COPY (don't mutate). sort total-order. n; even: ((copy[n/2-1]+
+   copy[n/2])/2.0,true); odd: (copy[n/2],true).
+  formatG (DEFERRED): nan->"nan"; +Inf->"inf"/-Inf->"-inf"; x==0 (incl -0.0)->"0"; abs=|x|;
+   exp=floor(log10(abs)); if exp<-4 OR exp>=4 scientific ({:.3e} then normalizeScientificExp); else
+   fixed digitsAfter=max(3-exp,0), trim trailing 0 then trailing '.'.
+   normalizeScientificExp: split on 'e'; expNum parse (0 on fail); mantissa trim trailing 0/'.';
+   sign +/-; pad abs exp to 2 digits (e.g. "1.234e+04","1e-05").
+-- markers --  n/a.
+-- mvp/deferred --  mean/sampleVariance/sampleStdev/median MVP. format_g + normalize_scientific_exp
+  DEFERRED (fixture-locked debug strings; Decision B = no CPython %g parity).
+-- edgeCases --
+  - mean([])->false; mean([5])->5; overflow to Inf -> false.
+  - sampleVariance [] / [5] -> false; all-identical -> 0.0; [1e200,-1e200] -> Inf -> false.
+  - sampleStdev [1e200,-1e200] -> false (propagates); [5] -> false.
+  - median []->false; odd middle (median([3,1,2])->2); even mean (median([4,1,2,3])->2.5); [42]->42;
+    COPY (caller slice untouched).
+  - variance uses (v-m)*(v-m); Rust .powi(2) = repeated multiply, use multiplication NOT math.Pow.
+  - mean finiteness rejects NaN too.
+-- goPortNotes --
+  Option<f64> -> (float64,bool). isFinite helper (!math.IsInf && !math.IsNaN). median: cp:=append(
+  []float64(nil),values...); sort.Float64s (NaN-free MVP) or total_cmp comparator. No string byte-len
+  math. format_g DEFERRED — Go strconv 'g'/'e' doesn't match the hand-rolled algo; implement per steps
+  later, no byte-parity. Sum order sequential (no parallel/pairwise). Leaf math; feeds SmartAnalyzer.
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/constraints.rs   ->   internal/smartcrusher/constraints.go   fetchedOk= True
+====================================================================================================
+NOT depth/size guards — the OSS default 'must-keep' constraint stack (error/outlier preservation seam,
+spec 8.5). Two stateless empty-struct constraints + a factory. MustKeep bodies are pure delegations to
+outliers.rs functions (out of scope here). MAX_DEPTH guards live in analyzer, NOT here.
+
+-- publicApi --
+  * Constraint (interface, from traits.rs — port together): { Name() string; MustKeep(items []Value,
+    itemStrings *[]string) []int }.
+  * KeepErrorsConstraint struct{} — Name()="keep_errors"; MustKeep delegates to
+    detect_error_items_for_preservation(items, itemStrings).
+  * KeepStructuralOutliersConstraint struct{} — Name()="keep_structural_outliers"; MustKeep IGNORES
+    itemStrings, delegates to detect_structural_outliers(items).
+  * default_oss_constraints() []Constraint — []Constraint{KeepErrorsConstraint{},
+    KeepStructuralOutliersConstraint{}} fixed order. Used by SmartCrusher.new (NOT builder).
+
+-- constants --
+  Name "keep_errors"; Name "keep_structural_outliers"; stack length=2; ERROR_KEYWORDS (12, from
+  error_keywords.rs — rustdoc INSIDE constraints.rs WRONGLY lists 11 omitting "failure"; TRUST 12).
+-- markers --  n/a.
+-- mvp/deferred --  All three MVP (spec 8.5). Detection bodies MVP but in outliers.rs unit. DEFERRED:
+  Enterprise constraints (BusinessRuleConstraint, RegulatoryConstraint) + builder composition surface.
+-- edgeCases --
+  - Empty items: both return empty without panic (test constraints_handle_empty_array).
+  - itemStrings provided vs nil for KeepErrors -> IDENTICAL results (cache is perf only).
+  - KeepStructuralOutliers IGNORES itemStrings (param _item_strings).
+  - Out-of-bounds indices never returned (allocator silently drops if any).
+  - Stateless zero-field values (Rust Debug/Default/Clone/Copy).
+-- goPortNotes --
+  NO depth/size guards here. Constraint interface from traits.rs. MustKeep bodies pure delegations to
+  outliers.go (stub/depend). itemStrings: Rust Option<&[String]> -> *[]string or ([]string,bool); nil
+  -> recompute; only KeepErrors uses it. Empty structs, value receivers. ERROR_KEYWORDS substring
+  match (in outliers.go): lowercase haystack + strings.Contains (membership, no rune math). No CCR
+  markers. MVP — port early (lossy SmartSample + compaction consume the must-keep union).
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/error_keywords.rs   ->   internal/smartcrusher/errorkeywords.go   fetchedOk= True
+====================================================================================================
+Tiny constant file: ERROR_KEYWORDS, 12 lowercase keywords, FALLBACK preservation signal. Matching
+contract: keywords lowercase by construction; CALLER lowercases the haystack; SUBSTRING containment
+(not whole-word/prefix/regex/anchoring). Bias toward over-preservation.
+
+-- publicApi --
+  * ErrorKeywords = []string{"error","exception","failed","failure","critical","fatal","crash",
+    "panic","abort","timeout","denied","rejected"}.
+
+-- constants --  ERROR_KEYWORDS (12, exact order/spelling); length invariant = 12.
+-- markers --  n/a.
+-- mvp/deferred --  Entirely MVP (spec 8.5 error preservation).
+-- edgeCases --
+  - Empty haystack -> nothing flagged (no special case).
+  - Substring (not whole-word) -> 'no error here', 'criticality', 'aborted', 'failed_login' all flag
+    (intentional over-preservation, do NOT 'fix').
+  - Caller-lowercase invariant: never uppercase the keyword list to compensate.
+  - Pure ASCII keywords; lowercase haystack via strings.ToLower. No regex, no anchoring.
+-- goPortNotes --
+  var errorKeywords []string (package-private unless sibling needs it). Preserve exact order/spelling.
+  Matcher (likely in outliers.go): for _, kw := range errorKeywords { if strings.Contains(haystackLower,
+  kw) {return true} }. Param ALREADY lowercased by caller. Tests: len==12; all-lowercase invariant;
+  pinned-membership set equality. Stdlib only (strings). MVP.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/hashing.rs   ->   internal/smartcrusher/hashing.go   fetchedOk= True
+====================================================================================================
+DIVERGENCE: does NOT compute CCR marker hashes. ONE function hash_field_name = SHA-256 of UTF-8 bytes,
+lowercase hex, FIRST 8 hex chars (= 4 digest bytes). NO MD5. NO <<ccr:...>> here. Purpose: cache keys
+to look up TOIN-anonymized preserve_fields (TOIN stores names as SHA-256[:8]). Port of Python
+_hash_field_name. Load-bearing: MUST be [:8] (a prior [:16] silently broke all preserve-field lookups).
+
+-- publicApi --
+  * HashFieldName(fieldName string) string — SHA-256(utf8 bytes), lowercase hex, first 8 chars.
+    Always exactly 8 lowercase-hex chars. == Python hashlib.sha256(name.encode()).hexdigest()[:8].
+
+-- constants --
+  TRUNCATE_LEN = 8 hex chars (= 4 digest bytes); HASH_ALGO = SHA-256 (NOT MD5); HEX_CASE = lowercase;
+  ENCODING = UTF-8 bytes.
+-- markers --  n/a (NO <<ccr:...>>).
+-- mvp/deferred --  MVP-shared infrastructure (preserve_fields / TOIN cache-key). Port verbatim.
+-- edgeCases --
+  - Empty string -> "e3b0c442" (SHA-256 of empty, truncated). Do NOT special-case to "".
+  - Unicode hashed over UTF-8 bytes: "café" (63 61 66 c3 a9) -> "850f7dc4". []byte(name) gives UTF-8;
+    do NOT iterate runes.
+  - Very long inputs still -> exactly 8 hex chars.
+  - Truncation MUST be 8 (cache correctness; [:16] = 100% cache misses).
+  - Lowercase hex required for equality with TOIN.
+  REFERENCE VECTORS (verified): "customer_id"->"1e38d67d", ""->"e3b0c442", "café"->"850f7dc4",
+  "test"->"9f86d081"; len==8.
+-- goPortNotes --
+  sum := sha256.Sum256([]byte(fieldName)); return hex.EncodeToString(sum[:])[:8]. NOT MD5. Hash bytes
+  not runes. Truncate on the HEX string (first 8). No orderedmap/JSON. Decision B irrelevant — pin
+  exact vectors. Add test len(HashFieldName(strings.Repeat("x",1000)))==8 to guard truncation drift.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/outliers.rs   ->   internal/smartcrusher/outliers.go   fetchedOk= True
+====================================================================================================
+Pure MVP statistical outlier/error preservation: three funcs returning []int indices to KEEP. NO
+mutation, NO CCR markers. detect_rare_status_values is the BUG#3-FIX core (cardinality cap raised to
+50, no >10 short-circuit). Decision B: scalar stringify need not be byte-identical, only internally
+consistent within one call.
+
+-- publicApi --
+  * DetectStructuralOutliers(items []*orderedmap.OrderedMap) []int — ascending-sorted, deduped;
+    rare-field OR rare-status. Empty if len<5. Non-objects skipped but count toward denominator n.
+  * DetectRareStatusValues(items, commonFields map[string]struct{}) []int — APPEND-ordered (unsorted,
+    dup-prone). Pareto-dominant cluster covering >=80%; only fields with 2..=50 distinct non-null
+    values where <=5 values reach 80%.
+  * DetectErrorItemsForPreservation(items, itemStrings []string) []int — ascending; object items whose
+    lowercased JSON contains any ERROR_KEYWORDS substring. itemStrings cache reuse; nil/too-short ->
+    per-index fresh serialize.
+  * ErrorKeywords (var, 12 lowercase).
+
+-- constants --
+  MIN_ITEMS_FOR_OUTLIER_DETECTION=5; COMMON_FIELD_RATIO=0.8 (>= inclusive); RARE_FIELD_RATIO=0.2
+  (strict <); CARDINALITY_MIN=2; CARDINALITY_MAX=50 (BUG#3); PARETO_COVERAGE=0.8 (ceil(total*0.8));
+  MAX_TOP_K=5 (strict >5 -> continue); NULL_SENTINEL="__none__"; ERROR_KEYWORDS_COUNT=12.
+-- algorithm --
+  detect_structural_outliers:
+   STEP1: len<5 -> empty. STEP2: field_counts map name->count (for each object item, +1 per KEY).
+   STEP3: n=len(items) (FULL count). STEP4: common_fields = count >= n*0.8. STEP5: rare_fields =
+   count < n*0.2 (0.8 uses >=, 0.2 strict <; exactly 20% = neither). STEP6: outlier SET ascending
+   (BTreeSet). STEP7: for each item i if object AND any key in rare_fields insert i. STEP8: insert all
+   detect_rare_status_values(items, common_fields). STEP9: return ascending-sorted []int.
+  detect_rare_status_values:
+   STEP A: outlier_indices append-ordered. STEP B: iterate common_fields ASCENDING sorted name. STEP C:
+   values = for each object item containing field_name take value (order preserved; missing -> skip).
+   STEP D stringify: Bool->true/false; Number->canonical string; String->raw; Null->separate;
+   array/object->JSON. SAME stringify for rarity + per-item lookup. STEP E: unique_values = set of
+   stringify(v) for v NOT null (NULLS EXCLUDED). STEP F: if !(2<=len(unique_values)<=50) continue.
+   STEP G: value_counts key->count over ALL values; key=stringify(non-null) else "__none__" (nulls
+   count here). STEP H: empty -> continue. STEP I: total=len(values). STEP J: Pareto sort count DESC,
+   tie key ASC. STEP K: threshold=ceil(total*0.8). STEP L: cumulative top-K until >=threshold (add
+   value to top_k_values, BREAK). STEP M: if len(top_k_values)>5 continue. STEP N: for each item i if
+   object containing field_name: item_value="__none__" if null else stringify; if NOT in top_k_values
+   APPEND i. STEP O: return (unsorted, dup-prone).
+  detect_error_items_for_preservation:
+   STEP P: error_indices []int. STEP Q: item not object -> continue (BEFORE cache lookup). STEP R:
+   serialized = lowercase(itemStrings[i]) if provided AND i<len, else lowercase(JSON-serialize(item))
+   (skip on serialize error). STEP S: if ANY ERROR_KEYWORDS substring -> append i (once per item).
+   STEP T: return.
+-- markers --  n/a.
+-- mvp/deferred --  All three MVP. DEFERRED sibling (NOT here): _detect_items_by_learned_semantics
+  (TOIN FieldSemantics). ERROR_KEYWORDS MVP-shared.
+-- edgeCases --
+  - len<5 -> empty before field counting.
+  - Non-objects count toward n (shifts 0.8/0.2 thresholds) but contribute no fields, skipped in scans.
+  - Field at exactly 20% neither common nor rare.
+  - Cardinality counts DISTINCT NON-NULL. 95x'ok'+5x null -> card 1 -> skip (nulls never reach
+    value_counts because gate short-circuits).
+  - Once card>=2, nulls count as "__none__"; null items can be flagged (90 ok+5 warn+5 null -> 10).
+  - Pareto threshold ceil: total=100 -> 80; total=99 -> ceil(79.2)=80. Use math.Ceil.
+  - MAX_TOP_K strict >5 (K<=5 allowed). Uniform 50-distinct never reaches 80% within K<=5 -> skip.
+  - Tiebreak count-then-key ASC determines top_k membership at boundary.
+  - detect_rare_status_values append-order + dup indices; caller dedupes.
+  - error cache shorter than items -> indices beyond fall back to fresh serialize per-index.
+  - error match case-insensitive substring; each item appended once. Non-objects skipped BEFORE cache.
+-- goPortNotes --
+  Item type: []any decoded with orderedmap; gate on type-assert to *orderedmap.OrderedMap (Rust
+  as_object()); n = WHOLE-array length (non-objects included). Determinism: field_counts BTreeMap +
+  result BTreeSet -> map then sort.Ints; iterate commonFields sorted. Pareto sort: count DESC then key
+  ASC (sort.SliceStable). threshold = int(math.Ceil(float64(total)*0.8)) — NOT (total*4+4)/5. Float
+  compares exact >= / <; cardinality 2<=len<=50 inclusive. Stringify (Decision B no byte-parity):
+  Bool->FormatBool; Number->json.Number string (UseNumber); String->raw; Null->"__none__" in
+  value_counts/per-item only, EXCLUDED from cardinality; arrays/objects->json.Marshal. SAME func for
+  rarity + value_counts + per-item. Cardinality gate BEFORE value_counts. Error: type-assert object
+  FIRST, THEN cache (itemStrings!=nil && i<len) else Marshal; ToLower; Contains over ErrorKeywords;
+  append once. ERROR_KEYWORDS sibling var. Tests: too-few->empty; rare-field 10%; 95 ok+5 mixed->5;
+  60 INFO+25 WARN+15 distinct ERR->15 (top-2=85%); uniform 50->empty; card 60->empty; card 1->empty;
+  95 ok+5 null->empty; 90 ok+5 warn+5 null->10; error basic->[1,3]; case-insensitive; cached drives
+  hit; short cache fallback; non-dict skipped.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/anchors.rs   ->   internal/smartcrusher/anchors.go   fetchedOk= True
+====================================================================================================
+"Query anchor" extraction/matching (NOT first/last row boundaries). Detect salient query tokens
+(UUIDs, 4+ digit IDs, hostnames, quoted strings, emails) then test if a JSON item contains any.
+"Deprecated" upstream (in favor of RelevanceScorer) but STILL called every live SmartCrusher
+invocation -> MVP. Five regexes, blocklist, >=2 trim, lowercasing all load-bearing. python_repr
+stringifies Python-str-style (single quotes, True/False/None) NOT JSON.
+
+-- publicApi --
+  * ExtractQueryAnchors(text string) map[string]struct{} — lowercased anchor set; empty if text empty.
+    Order irrelevant (use a set, NOT orderedmap; query-side, not compression path).
+  * ItemMatchesAnchors(item *orderedmap.OrderedMap, anchors map[string]struct{}) bool — false if
+    anchors empty; else pythonRepr(item) lowercased CONTAINS any anchor substring. Object keys in
+    insertion order (orderedmap).
+  * pythonRepr(value any) string [unexported] — Null->None; true->True; false->False; numbers natural;
+    strings ALWAYS single-quoted (parity gap); arrays [a, b, c] ', '; objects {'k': v, 'k2': v2}
+    single-quoted keys ': ' / ', '; insertion-order keys.
+
+-- constants --
+  UUID_PATTERN: \b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b (lowercased)
+  NUMERIC_ID_PATTERN: \b\d{4,}\b (kept as-is, 4+ digits; 3-digit NOT matched)
+  HOSTNAME_PATTERN: \b[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})?\b
+    (lowercased, dropped if exact-equals a blocklist entry)
+  QUOTED_STRING_PATTERN: ['"]([^'"]{1,50})['"] (capture group 1; kept only if TRIMMED len>=2; lowercased)
+  EMAIL_PATTERN: \b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b (literal '|' typo; reproduce
+    verbatim OR use [A-Za-z]{2,} — behaviorally identical)
+  HOSTNAME_FALSE_POSITIVES: ["e.g","i.e","etc."] (exact-string equality vs lowercased match)
+  QUOTED_TRIM_MIN_LEN=2 (BYTES of trimmed inner; Go len NOT rune)
+  QUOTED_MAX_INNER=50
+-- algorithm --
+  extract_query_anchors(text): empty set. text empty -> return. UUIDs: insert match.lower(). Numeric:
+   insert as-is. Hostnames: lc=match.lower(); if lc NOT in blocklist insert. Quoted: group1 inner; if
+   trim(inner) byte-len>=2 insert inner.lower() (store UN-trimmed inner lowercased; only LENGTH check
+   uses trimmed). Emails: insert match.lower(). Return set. Each regex over FULL original text
+   independently (a substring may contribute to multiple categories).
+  item_matches_anchors(item, anchors): empty anchors -> false. item_str=pythonRepr(item).lower().
+   return true iff ANY anchor substring of item_str.
+  pythonRepr: Null->'None'; true->'True'; false->'False'; Number->natural string; String s->'<s>'
+   (always single); Array->'[' + ', '-joined recursive + ']'; Object->'{' + ', '-joined pairs (single-
+   quoted key + ': ' + recursive) + '}', INSERTION order.
+-- markers --  n/a.
+-- mvp/deferred --  Both funcs + python_repr MVP (called live). RelevanceScorer replacement NOT here.
+-- edgeCases --
+  - Empty text -> empty set. Empty anchors -> false (early). 3-digit NOT anchor; 4+ yes.
+  - Quoted <2 trimmed chars skipped; stored anchor is raw (untrimmed) inner lowercased.
+  - Hostname blocklist exact-equality on lowercased ('e.g' dropped; 'e.g.com' NOT dropped).
+  - Email TLD class has literal '|' (typo, harmless).
+  - UUID case-insensitive pattern + lowercased result. Numeric IDs only category not lowercased.
+  - item match tests BOTH keys and values (pythonRepr includes single-quoted keys).
+  - Null repr: anchor 'none' MATCHES {'val': None}; 'null' does NOT (whole reason pythonRepr exists).
+  - Single-quote drift: "it's fine" -> {'k': 'it's fine'} (Python would switch to double) — reproduce
+    always-single.
+  - Object key order MUST be insertion order (map[string]any would randomize -> orderedmap).
+-- goPortNotes --
+  Go regexp (RE2) — all five patterns RE2-safe (\b ASCII). FindAllString (UUID/numeric/hostname/email);
+  FindAllStringSubmatch[1] (quoted). strings.ToLower; numeric as-is. TrimSpace then len(trimmed)>=2
+  (BYTES); store raw inner lowercased. Blocklist map/slice exact equality. Return map[string]struct{}
+  (set; orderedmap NOT needed query-side). pythonRepr: decode with orderedmap, type-switch
+  *orderedmap.OrderedMap/[]any/string/bool/float64|json.Number/nil; do NOT map[string]any. Number:
+  json.Number preserves literal (safest). Email '|': reproduce verbatim or simplify (identical). NO
+  CCR/savings/float-format. Compile regexes at init. ExtractQueryAnchors once per Crush from `query`
+  arg; ItemMatchesAnchors per item. ~20 tests -> table tests.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/orchestration.rs   ->   internal/smartcrusher/orchestration.go   fetchedOk= True
+====================================================================================================
+NOT the classify->plan->crush->format orchestrator the brief expected — index-set helpers over a
+sorted index set (BTreeSet<usize>): dedup, diversity-fill, critical-first prioritization. NO CCR
+markers, NO savings gate, NO fallback chain (those in crusher.rs/planning.rs). Shared MD5[:16] hash for
+cross-language dedup parity (same helper anchor_selector uses).
+
+-- publicApi --
+  * DeduplicateIndicesByContent(keepIndices SortedIntSet, items []JSONValue) SortedIntSet — collapse
+    content-dups to lowest index; ascending; skip out-of-bounds; empty->empty.
+  * FillRemainingSlots(keepIndices SortedIntSet, items []JSONValue, n int, effectiveMax int)
+    SortedIntSet — top up toward effectiveMax with content-unique stride-sampled candidates.
+  * PrioritizeIndices(cfg *SmartCrusherConfig, keepIndices SortedIntSet, items []JSONValue, n int,
+    analysis *ArrayAnalysis, effectiveMax int) SortedIntSet — dedup->fill->if<=budget return; else keep
+    ALL criticals + first-3/last-2 anchors + fill ascending; MAY exceed effectiveMax.
+  * numericAnomalyIndices(cfg, items, analysis) SortedIntSet [unexported].
+  * itemContentHash(item JSONValue, idx int) string [unexported] — object/array -> compute_item_hash
+    (sort_keys json.dumps + md5[:16]); scalar -> md5(stringForm)[:16] null='None'; serialize fail ->
+    md5('__idx_<idx>__')[:16].
+
+-- constants --
+  variance_threshold=2.0; dedup_identical_items=true; first_anchors=3; last_anchors=2; hash_hex_len=16;
+  null_scalar_literal="None"; idx_stamp_format="__idx_{idx}__".
+-- algorithm --
+  compute_item_hash(item): serialize via python_json_dumps_sort_keys (sort_keys=true, separators ', '
+   and ': ' WITH spaces, ensure_ascii=true -> \uXXXX), MD5 UTF-8 bytes, lowercase hex first 16 chars.
+   SAME shared func anchor_selector uses.
+  item_content_hash(item, idx): object/array -> compute_item_hash. scalar: String->raw; Number->string;
+   Bool->'true'/'false'; Null->'None' (literal); other -> '__idx_<idx>__'. MD5 first 16.
+  deduplicate_indices_by_content: empty -> empty. Iterate ASCENDING; skip idx>=len; h=item_content_hash;
+   record h->idx only if h unseen (first/lowest wins). Return recorded values as sorted set.
+  fill_remaining_slots: remaining = saturating(effectiveMax - len). remaining==0 -> clone unchanged.
+   seen = hashes of keepIndices (idx<n). candidates = 0..n NOT in keepIndices ascending. empty -> clone.
+   result=clone. step=max(1, len(candidates)/(remaining+1)). added=0. STRIDE loop: for startOffset in
+   0..step: if added>=remaining break outer; walk i=startOffset, +step,...: if added>=remaining break
+   BOTH; idx=candidates[i]; h=item_content_hash; if h not in seen -> insert idx, seen+=h, added++.
+   Return result.
+  prioritize_indices: STEP1 if dedupIdenticalItems -> dedup else clone. STEP2 if len<effectiveMax AND
+   len<n -> fill. STEP3 if len<=effectiveMax -> return early. OVER-BUDGET: errorIndices=
+   detect_error_items_for_preservation(items,None) sorted; outlierIndices=detect_structural_outliers
+   sorted; anomalyIndices=numeric_anomaly_indices; learnedIndices=EMPTY (TOIN). prioritized=union.
+   ANCHORS: remaining=saturating(effectiveMax-len(prioritized)). if>0: for i in 0..min(3,n): if i not
+   in prioritized and remaining>0 insert,remaining--. lastStart=saturating(n-2); for i in lastStart..n:
+   same. FILL-OTHERS: if remaining>0: others=(current MINUS prioritized) sorted ascending; for i in
+   others: if remaining==0 break; insert; remaining--. return prioritized (MAY exceed effectiveMax).
+  numeric_anomaly_indices: analysis nil -> empty; field_stats empty -> empty. For each (name,stats)
+   numeric with mean_val + variance>0: std=sqrt; if std<=0 skip; threshold=varianceThreshold*std; for
+   each (i,item) object: obj[name] parses f64 (num) AND !NaN AND abs(num-mean_val)>threshold -> insert.
+-- markers --  n/a (index sets only).
+-- mvp/deferred --  MVP: dedup, fill, prioritize (incl criticals + anchors), numeric_anomaly_indices,
+  item_content_hash. DEFERRED: TOIN learned_indices (hardwired empty; no field_semantics).
+-- edgeCases --
+  - keepIndices empty -> dedup empty; fill remaining==0 -> clone.
+  - Out-of-bounds skipped (dedup); fill seen only idx<n.
+  - fill remaining SATURATING (no underflow at/over budget).
+  - step floor-div then max(1,...) -> always >=1.
+  - fill inner break is LABELLED out of BOTH loops.
+  - prioritize early-return when len<=effectiveMax after dedup+fill.
+  - Over-budget result MAY EXCEED effectiveMax (criticals never dropped).
+  - lastStart=saturating(n-2); n<2 clamps 0 (last-2 overlaps first-3 harmlessly; set idempotent).
+  - numeric anomaly: NaN excluded; non-object/missing-field skipped; var<=0/std<=0 short-circuit.
+  - Key-order independence: {b,a}=={a,b} hash identically (sort_keys=true).
+  - learned_indices hardwired empty.
+-- goPortNotes --
+  Sorted deterministic index collection: BTreeSet<usize> -> sorted []int or map[int]struct{}+sort. Never
+  iterate Go map unsorted. compute_item_hash SAME shared helper (sort_keys json.dumps WITH spaces ', '
+  and ': ', ensure_ascii=true -> \uXXXX; MD5 first 16). orderedmap items must re-sort keys alphabetically
+  before hashing. .len() = element count (int, safe). scalar branch: null->'None', bool->'true'/'false',
+  number->string, string->raw; Decision B: number repr internally consistent (stability matters, not
+  byte-parity). satSub helper. fill step int div + max(1). labeled break/flag. Deps: detect_error_items_
+  for_preservation/detect_structural_outliers (outliers); ArrayAnalysis.FieldStats {field_type, mean_val
+  *float64, variance *float64}; Config{VarianceThreshold, DedupIdenticalItems}. field_stats iteration
+  order doesn't change final set (sorted). Tests: dedup_lowest_index_wins; dedup_skips_out_of_bounds;
+  dedup_key_order_independent; fill_when_at_or_over_budget_returns_unchanged;
+  fill_adds_diverse_uniques_up_to_max; fill_skips_content_duplicates;
+  prioritize_under_budget_passthrough_after_dedup; prioritize_dedup_collapses_then_returns_under_max;
+  prioritize_keeps_error_items_when_over_budget ('FATAL: out of memory' survives);
+  prioritize_includes_first_3_and_last_2_when_room.
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/planning.rs   ->   internal/smartcrusher/planning.go   fetchedOk= True
+====================================================================================================
+Strategy dispatcher: ArrayAnalysis -> CompressionPlan whose keep_indices is a sorted list of original
+indices to retain. Emits NO CCR markers, NO byte-rewriting (downstream). MVP = create_plan dispatcher
+(Skip + SmartSample routing) + plan_smart_sample + shared helpers. Heavy planners DEFERRED.
+
+-- publicApi --
+  * SmartCrusherPlanner struct { Config *SmartCrusherConfig; AnchorSelector *AnchorSelector;
+    Scorer RelevanceScorer; Analyzer *SmartAnalyzer; Constraints []Constraint }.
+  * NewSmartCrusherPlanner(config, anchorSelector, scorer, analyzer, constraints) *SmartCrusherPlanner.
+  * CreatePlan(analysis *ArrayAnalysis, items []*orderedmap.OrderedMap, queryContext string,
+    preserveFields []string, effectiveMaxItems *int, itemStrings []string) *CompressionPlan.
+  * PlanSmartSample(analysis, items, plan, queryContext, preserveFields, maxItems, itemStrings)
+    *CompressionPlan — MVP default/fallback.
+  * PlanTopN / PlanClusterSample / PlanTimeSeries — DEFERRED.
+  * MapToAnchorPattern(strategy) DataPattern — TimeSeries->TimeSeries, TopN->SearchResults,
+    ClusterSample->Logs, default->Generic.
+  * ItemHasPreserveFieldMatch(item, preserveFieldHashes []string, queryContext string) bool — TOIN,
+    present but unexercised (callers pass nil).
+
+-- constants -- (see consolidated table; key)
+  smart_sample change-point window -1..=1 (gated on preserve_change_points; clamp [0,n));
+  variance anomaly threshold = variance_threshold*std; anchor pattern map (MVP SmartSample->Generic);
+  field-name hash = hash_field_name SHA256[:8]. DEFERRED: time_series window -2..=2 (ungated); cluster
+  unique_ratio>0.3, first 50 chars md5 first 8; cluster reps take(2); top_n top_count =
+  max_items.saturating_sub(3); top_n high_threshold = max(relevance_threshold*2.0, 0.5); top_n
+  max_relevance_adds=3; top_n default score=0.0.
+-- algorithm --
+  create_plan: (1) max_items = effective_max_items if Some else config.max_items_after_crush. (2)
+   plan.strategy=recommended_strategy; constant_fields = analysis.constant_fields.clone() if
+   config.factor_out_constants else empty; defaults. (3) SKIP short-circuit: if recommended_strategy==
+   Skip set keep_indices=0..len and return. (4) Dispatch: TimeSeries->plan_time_series (DEFERRED),
+   ClusterSample->plan_cluster_sample (DEFERRED), TopN->plan_top_n (DEFERRED); ALL OTHER (SmartSample/
+   None) -> plan_smart_sample (MVP).
+  plan_smart_sample (use sorted-unique int set): n=len. keep=empty.
+   Step1 anchors: pattern=map_to_anchor_pattern(SmartSample)=Generic; keep += anchor_selector.
+   select_anchors(items, max_items, Generic, query_or_none(query_context)).
+   Step2 constraints: apply_constraints (union over Constraint.must_keep; OSS default KeepErrors +
+   KeepStructuralOutliers).
+   Step3 anomalies: for each (name,stats) in field_stats call for_each_anomaly(name,stats,items,
+   variance_threshold,keep).
+   Step4 change points: IF config.preserve_change_points: for each stats in field_stats, for each cp in
+   stats.change_points, for offset in -1..=1, idx=cp+offset; if 0<=idx<n insert.
+   Step5/6 query signals: apply_query_signals(items, query_context, item_strings, keep,
+   keep_existing_only=false).
+   Step7 preserve fields: apply_preserve_field_matches(items, query_context, preserve_fields, keep)
+   (callers pass nil -> no-op guard; keep present).
+   Step8: final_keep = prioritize_indices(config, keep, items, n, Some(analysis), max_items). plan.
+   keep_indices = sorted final_keep. return.
+  apply_constraints(items, item_strings, keep): for each c: keep.extend(c.must_keep(items,
+   item_strings)). Pure union.
+  apply_query_signals(items, query_context, item_strings, keep, keep_existing_only): if query empty
+   return. (a) Deterministic: anchors=extract_query_anchors(query); for each (i,item): if
+   keep_existing_only AND keep has i skip; else if item_matches_anchors(item,anchors) insert.
+   (b) Probabilistic: strs=item_strings if Some else serialize each (empty on error);
+   scores=scorer.score_batch(strs, query); for each (i,sc): if keep_existing_only AND keep has i skip;
+   else if sc.score>=config.relevance_threshold insert.
+  apply_preserve_field_matches: if preserve_fields None/empty return. if query empty return. for each
+   (i,item): if item_has_preserve_field_match insert.
+  map_to_anchor_pattern: TimeSeries->TimeSeries, TopN->SearchResults, ClusterSample->Logs, else Generic.
+  for_each_anomaly(field_name, stats, items, variance_threshold, keep): field_type!="numeric" return;
+   mean_val+variance required else return; variance<=0.0 return; std=sqrt; std<=0.0 return; threshold=
+   variance_threshold*std; for each (i,item): num=item.get(field_name).as_f64(); if num present AND not
+   NaN AND abs(num-mean)>threshold insert.
+  query_or_none(q): None if empty else Some(q).
+  item_has_preserve_field_match (TOIN, present, unexercised): query empty -> false; not object -> false;
+   query_lower; for each (field_name, value): h=hash_field_name(field_name); if no hash matches h
+   continue; if value null continue; value_str=String value or to_string lowercased; if contains
+   bidirectionally -> true. After loop false.
+  DEFERRED plan_top_n / plan_cluster_sample / plan_time_series: see constants; top_n does NOT call
+   prioritize_indices and sets keep_count; cluster/time_series DO call prioritize_indices.
+-- markers --  n/a (keep_indices only).
+-- mvp/deferred --  MVP: create_plan dispatcher (Skip + route non-heavy to plan_smart_sample),
+  plan_smart_sample, shared helpers (apply_constraints/apply_query_signals/apply_preserve_field_matches/
+  map_to_anchor_pattern/query_or_none/for_each_anomaly/item_has_preserve_field_match). DEFERRED:
+  plan_top_n, plan_cluster_sample, plan_time_series; dispatcher arms stub to plan_smart_sample.
+-- edgeCases --
+  - Skip: keep ALL 0..n and return before dispatch (defensive; crush_array short-circuits earlier).
+  - Empty query: apply_query_signals + apply_preserve_field_matches + item_has_preserve_field_match
+    all no-op/false.
+  - preserve_fields None/empty: apply_preserve_field_matches no-op (callers ALWAYS pass None — MVP
+    hardwire None, keep guard).
+  - for_each_anomaly skips: non-numeric; missing mean/variance; variance<=0; std<=0; NaN.
+  - Change-point window clamps [0,n); smart_sample gated on preserve_change_points; time_series ungated.
+  - top_n falls back to plan_smart_sample when no score field.
+  - top_n does NOT call prioritize_indices, sets keep_count; others DO.
+  - Relevance serialization fallback empty string on error.
+  - constant_fields only copied when factor_out_constants true.
+  - keep is set; duplicate insertions idempotent; final keep_indices sorted ascending.
+  - max_items: effective_max_items overrides config.max_items_after_crush.
+-- goPortNotes --
+  Emits NO CCR markers (set markers=n/a). items []*orderedmap.OrderedMap; ordered field iteration in
+  item_has_preserve_field_match. Set semantics: map[int]struct{} + sort.Ints. field_stats BTreeMap:
+  iterate sorted keys for determinism. Cluster .chars().take(50) char-count (DEFERRED). md5 cluster
+  DEFERRED. top_n f64 sort b.partial_cmp(a) NaN->Equal (DEFERRED). Decision B: Go math.Sqrt + direct
+  float compares. Deps: anchor_selector.select_anchors, Constraint.must_keep, prioritize_indices,
+  extract_query_anchors, item_matches_anchors, RelevanceScorer.score_batch, detect_score_field_
+  statistically (DEFERRED), hash_field_name, types. MVP slice: create_plan (Skip + SmartSample),
+  plan_smart_sample, shared helpers; stub/omit the three heavy planners. Seam: invoked by orchestration,
+  not the Crush interface directly. bias does not appear here (orchestration concern).
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/observer.rs   ->   internal/smartcrusher/observer.go   fetchedOk= True
+====================================================================================================
+Observability-only, MVP-IRRELEVANT to compression. ONE type TracingObserver (zero-field). Can be
+omitted/stubbed for MVP without affecting compression correctness or the seam.
+
+-- publicApi --
+  * TracingObserver struct{} — implements Observer.
+  * (TracingObserver) Name() string -> "tracing".
+  * (TracingObserver) OnEvent(event *CrushEvent) — debug log under target "headroom::smart_crusher",
+    message "smart_crusher.crush emitted", fields strategy/input_bytes/output_bytes/elapsed_ns/
+    was_modified. Zero-cost when debug filtered; MUST NOT panic.
+  * CrushEvent (from traits.rs): { Strategy string; InputBytes int; OutputBytes int; ElapsedNs uint64;
+    WasModified bool }.
+  * Observer (from traits.rs): { Name() string; OnEvent(event *CrushEvent) }.
+
+-- constants --
+  name()="tracing"; target="headroom::smart_crusher"; message="smart_crusher.crush emitted";
+  level=debug; fields = strategy, input_bytes, output_bytes, elapsed_ns, was_modified.
+-- markers --  n/a.
+-- mvp/deferred --  ENTIRE file DEFERRED telemetry. CrushEvent struct + Observer interface SHAPE (in
+  traits.rs) MVP-shared but compression path can ignore. Omit/stub TracingObserver with zero impact.
+-- edgeCases --
+  - Stateless; logs verbatim (empty strategy / zero bytes / zero elapsed all fine).
+  - Must-not-panic (test tracing_observer_does_not_panic_on_event).
+  - Zero-cost-when-filtered: NO field evaluation when DEBUG filtered (level gate first).
+  - input/output_bytes are BYTE counts (len(string)).
+  - Observers fire in registration order, synchronous, after result.
+-- goPortNotes --
+  Optional/omittable for MVP. log/slog with level-enabled guard: slog.Debug("smart_crusher.crush
+  emitted", "strategy", e.Strategy, "input_bytes", e.InputBytes, ...). Types CrushEvent/Observer from
+  traits.go. int byte counts, uint64 ElapsedNs. Seam carries no observer plumbing. No orderedmap/float
+  concerns.
+
+
+====================================================================================================
+SUBSYSTEM: compaction/mod.rs   ->   internal/smartcrusher/compaction/doc.go + stage.go   fetchedOk= True
+====================================================================================================
+Compaction submodule SURFACE / orchestration. Declares 5 submodules (classifier, compactor, formatter,
+ir, walker), re-exports, defines CompactionStage glue. NO compaction logic/markers/float-math here.
+
+-- publicApi --
+  * CompactionStage struct { Config CompactConfig; Formatter Formatter }.
+  * DefaultCsvSchemaStage() CompactionStage — CsvSchemaFormatter + CompactConfig::default (OSS preset).
+  * CsvSchemaStage(config CompactConfig) CompactionStage — explicit config (SmartCrusher.New uses this).
+  * DefaultJSONStage() / DefaultMarkdownKVStage() CompactionStage.
+  * SupportedFormatNames = []string{"csv-schema","json","markdown-kv"} (exact order; single source of
+    truth, sync with FromFormatName).
+  * FromFormatName(name string) (*CompactionStage, bool) — csv-schema/json/markdown-kv; nil,false for
+    unknown (case-sensitive exact). Caller owns fallback.
+  * (s *CompactionStage) Run(items []JSONValue) (*Compaction, string) — c:=compact(items,s.Config);
+    rendered:=s.Formatter.Format(&c); return (&c, rendered). Returns IR tree (kept/total counts) + bytes.
+  * Re-exports to mirror: classify_cell/CellClass/ClassifyConfig; compact/CompactConfig;
+    CsvSchemaFormatter/Formatter/JsonFormatter/MarkdownKvFormatter; Bucket/CellValue/Compaction/
+    FieldSpec/OpaqueKind/Row/Schema; compact_document/emit_opaque_ccr_marker/try_parse_json_container/
+    DocumentCompactor.
+
+-- constants --  SUPPORTED_FORMAT_NAMES = ["csv-schema","json","markdown-kv"].
+-- markers --  n/a (re-exports walker::emit_opaque_ccr_marker which builds the comma-form elsewhere).
+-- mvp/deferred --  Surface MVP. MVP re-exports: compact/CompactConfig, classify_cell/CellClass/
+  ClassifyConfig, IR core (Compaction/FieldSpec/Row/Schema/CellValue/OpaqueKind), CsvSchemaFormatter,
+  JsonFormatter, compact_document/emit_opaque_ccr_marker. DEFERRED: Bucket (heterogeneous),
+  try_parse_json_container deep nesting, MarkdownKvFormatter body — port NAMES so FromFormatName/IR
+  compile, bodies stubbed.
+-- edgeCases --
+  - FromFormatName nil for unknown (case-sensitive: 'CSV-Schema'/'csv_schema' don't match). Caller
+    decides fallback (do NOT silently default).
+  - csv_schema(config) vs default_csv_schema(): both CsvSchemaFormatter; only config source differs.
+  - run() returns IR tree alongside bytes so callers read kept/total.
+  - Debug renders formatter via name() not value (dyn not Debug) -> Go formatter.Name().
+  - JsonFormatter byte-equal parity in Rust; Decision B = don't chase it in Go.
+-- goPortNotes --
+  Module-surface -> doc.go + stage.go. Box<dyn Formatter> -> Formatter interface { Format(c
+  *Compaction) string; Name() string } field. Option<Self> -> (*CompactionStage, bool). Four
+  constructors. SUPPORTED_FORMAT_NAMES as []string same order + sync test. Run -> (s *CompactionStage)
+  Run(items []*orderedmap.OrderedMap) (*Compaction, string). PyO3 mention ignored. Bucket/
+  try_parse_json_container DEFERRED — stub names.
+
+
+====================================================================================================
+SUBSYSTEM: compaction/ir.rs   ->   internal/smartcrusher/compaction/ir.go   fetchedOk= True
+====================================================================================================
+Renderer-agnostic types-only IR between compactor (producer) and formatter (consumer). NO algorithms/
+constants/I-O/float-format. Recursive tree. Shared spine — port early.
+
+-- publicApi --
+  * OpaqueKind (enum: Base64Blob | LongString | HtmlChunk | Other(string)) — value-equal; Other(name)
+    deferred routing, treated AS LongString.
+  * FieldSpec struct { Name string; TypeTag string; Nullable bool } — Name may be dotted (meta.region);
+    TypeTag in {int,float,string,bool,null,json,ccr}; Nullable iff some row absent OR explicit null.
+  * Schema struct { Fields []FieldSpec }; (s Schema) FieldNames() []string (in order).
+  * CellValue (enum: Scalar(Value) | Nested(*Compaction) | OpaqueRef{CcrHash string; ByteSize int;
+    Kind OpaqueKind} | Missing) — Missing DISTINCT from Scalar(Null). Clone only, NOT PartialEq.
+  * Row struct { Cells []CellValue } + New([]CellValue) Row, Len() int, IsEmpty() bool — cell order +
+    length match parent Schema.Fields.
+  * Bucket struct { Key Value; Schema Schema; Rows []Row } — DEFERRED.
+  * Compaction (enum: Table{Schema; Rows []Row; OriginalCount int} | Buckets{Discriminator string;
+    Buckets []Bucket; OriginalCount int} | OpaqueRef{CcrHash string; ByteSize int; Kind OpaqueKind} |
+    Untouched(Value)).
+  * (c Compaction) KeptRowCount() int; OriginalRowCount() int; WasCompacted() bool.
+
+-- constants --  none. (TypeTag closed set int|float|string|bool|null|json|ccr.)
+-- markers --  n/a (OpaqueRef carries raw ccr_hash/byte_size/kind; formatter builds comma-form later).
+-- mvp/deferred --  MVP: OpaqueKind (4), FieldSpec, Schema+FieldNames, Row+New/Len/IsEmpty, CellValue
+  (Scalar/OpaqueRef/Missing), Compaction (Table/OpaqueRef/Untouched), 3 methods. DEFERRED but defined
+  for tree completeness: Bucket + Compaction::Buckets; CellValue::Nested as recursion hook (stringified-
+  JSON deferred; inner-array recursion rare in MVP).
+-- algorithm --
+  KeptRowCount: Table->len(rows); Buckets->sum bucket rows; OpaqueRef->0; Untouched->0.
+  OriginalRowCount: Table/Buckets->OriginalCount; OpaqueRef->0; Untouched->0.
+  WasCompacted: true for Table/Buckets/OpaqueRef; false ONLY Untouched.
+-- edgeCases --
+  - Missing != Scalar(Null) — never normalize (test cell_missing_distinct_from_scalar_null Debug differ).
+  - Schema field order load-bearing (header + per-row cell order). ordered slice, never map.
+  - Row length+order == Schema.Fields (cells[i]<->fields[i]; position-only binding).
+  - type_tag fixed lowercase literals; 'json' last-resort, 'ccr' marks CCR pointers.
+  - OpaqueKind::Other routed AS LongString.
+  - kept/original 0 for OpaqueRef/Untouched (not byte size, not 1).
+  - original_count captured BEFORE drop; drop count = original - kept (NOT stored).
+  - byte_size = usize from .len() = BYTE length -> Go int from len(string).
+  - CellValue no PartialEq (Box not Eq); compare structurally.
+  - Untouched is ONLY non-compacted variant -> caller routes to lossy fallback.
+-- goPortNotes --
+  Types-only; port early. No Go sum types -> sealed interfaces (CellValue: CellScalar/CellNested/
+  CellOpaqueRef/CellMissing; Compaction: Table/Buckets/OpaqueRef/Untouched) OR tagged structs (Kind
+  field). Nested -> *Compaction pointer (replaces Box). serde_json::Value (Scalar/Bucket.key/Untouched)
+  -> orderedmap on compression path (orderedmap NOT yet in go.mod — add in Plan 3); lighter rep ok for
+  scalar but object-valued Scalars + Untouched arrays need ordered. byte_size int; ccr_hash string.
+  type_tag/OpaqueKind string-backed consts exact (do NOT rename). FieldNames method. kept/original/
+  was_compacted methods per table. OpaqueRef rendered later via ccr.MarkerForCell(hash,kind,size)
+  comma-form — do NOT add a new builder. Bucket/Buckets DEFERRED (include type, never produce in MVP).
+  Decision B: no float formatting here. Port 5 tests as table tests: FieldNames order; Untouched ->
+  !was_compacted/0/0; Table{2,5}->compacted/2/5; Buckets{2+1,10}->3/10; Missing != Scalar(Null).
+
+====================================================================================================
+SUBSYSTEM: compaction/classifier.rs   ->   internal/smartcrusher/compaction/classifier.go   fetchedOk= True
+====================================================================================================
+Per-cell classifier (conservative: when in doubt -> Scalar). NOT homogeneity detection (that's deferred
+to the CALLER per the JsonObject doc). MVP-relevant (decides which cells become opaque CCR cells).
+Light/pure, no float-format, no markers, no recursion.
+
+-- publicApi --
+  * CellClass (enum: Scalar | JsonObject | JsonArray | StringifiedJson(Value) | Opaque(OpaqueKind)).
+  * ClassifyConfig { opaque_min_bytes int; base64_alphabet_ratio float64; html_min_open_brackets int }
+    + Default (256, 0.95, 3).
+  * classify_cell(value *Value, cfg *ClassifyConfig) CellClass.
+  * classify_string (private), looks_like_base64 (private), looks_like_html (private).
+
+-- constants --
+  opaque_min_bytes=256 (strictly > -> opaque candidate); base64_alphabet_ratio=0.95;
+  html_min_open_brackets=3; base64 min length=64 (hardcoded); base64 unique-char floor=16 (hardcoded);
+  base64 alphabet extra '+' '/' '=' '_' '-'; html tag-start next-byte = ascii-alpha OR '/' OR '!';
+  stringified-JSON gate '{' or '['.
+-- algorithm --
+  classify_cell: object->JsonObject; array->JsonArray; string->classify_string; else Scalar.
+  classify_string (ordered, first match):
+   STEP1 stringified-JSON: trimmed = trim_start(s). If first char '{' OR '[': parse ORIGINAL untrimmed
+    s; if parses AND object/array -> StringifiedJson(parsed). (parse original, gate checks trimmed
+    first char; "123" parses as number but NOT returned.)
+   STEP2 length gate: if len(s) <= opaque_min_bytes (256, BYTE) return Scalar (strict > to proceed).
+   STEP3 base64: looks_like_base64 -> Opaque(Base64Blob).
+   STEP4 html: looks_like_html -> Opaque(HtmlChunk).
+   STEP5 fallback: Opaque(LongString).
+  looks_like_base64(s, ratio): len<64 (BYTES) -> false. contains '<' OR '>' -> false. ANY whitespace
+   (Unicode) -> false. total=len(s) BYTES; alphabet=count CHARS ascii-alphanumeric OR +/=_- (alphabet
+   counts CHARS, total BYTES; identical for ASCII). if alphabet/total < ratio (0.95) -> false.
+   diversity: accumulate unique chars; on reaching >=16 unique return true immediately; consumed
+   without 16 -> false.
+  looks_like_html(s, minOpen): opens=count '<'. if opens<minOpen (3) -> false. operate on BYTE slice:
+   for each byte '<', look at i+1; if ascii-alpha OR '/' OR '!' increment tag_starts. return
+   tag_starts>=minOpen.
+-- markers --  n/a (KIND for comma-form derived downstream from OpaqueKind).
+-- mvp/deferred --  classify_cell MVP (opaque CCR cell entry). MVP variants: Scalar/JsonObject/
+  JsonArray/Opaque(Base64Blob|HtmlChunk|LongString). PARTIALLY DEFERRED: StringifiedJson produced here
+  (cheap) but downstream recursion deferred. Uniformity NOT here (deferred to caller).
+-- edgeCases --
+  - Stringified-JSON: gate trims leading whitespace for first-char check but parses ORIGINAL untrimmed.
+    '  {"a":1}' eligible; serde parses whole original.
+  - "123"/"true"/"null" parse but scalars -> NOT StringifiedJson (fail '{'/'[' gate; short -> Scalar).
+  - '{not json}' short -> Scalar; padded >256 -> Opaque(LongString) (parse fails, base64 fails low
+    diversity, html fails no tags).
+  - Length gate BYTE length (len(string)).
+  - base64 total BYTES vs alphabet CHARS only diverges non-ASCII; realistic base64 ASCII -> equal.
+  - base64 disqualifiers ('<','>',whitespace) checked BEFORE ratio/diversity, short-circuit false.
+  - html requires BOTH opens>=min AND tag_starts>=min ('a < b' rejected -> LongString).
+  - base64 before html so real base64 (no '<') wins.
+  - opaque_min_bytes configurable down (test 10).
+  - Opaque sub-classification telemetry only — all CCR-substituted identically downstream.
+-- goPortNotes --
+  Uniformity NOT here (deferred to caller/other module — resist pulling in). OpaqueKind from ir.go.
+  CellClass: struct{Kind CellClassKind; Parsed *orderedmap.OrderedMap-or-Value}; Parsed via ordered
+  decoder (NOT map[string]any); avoid double-parse (return parsed). Parse original (untrimmed).
+  trim_start -> strings.TrimLeftFunc(s, unicode.IsSpace); first rune of trimmed. char::is_whitespace
+  -> range runes + unicode.IsSpace. is_ascii_alphanumeric -> ASCII-only check (NOT unicode.IsLetter).
+  looks_like_html iterates BYTES with i+1 lookahead -> []byte loop. Diversity map[rune]struct{} (or
+  256-bool ASCII) early-exit at 16. KIND derives from OpaqueKind (confirm vs ir.go/cell renderer).
+  Decision B: integer/float comparisons, no formatting. NewClassifyConfig/DefaultClassifyConfig
+  constructor + per-field override. 13 unit tests.
+
+
+====================================================================================================
+SUBSYSTEM: compaction/walker.rs   ->   internal/smartcrusher/compaction/walker.go   fetchedOk= True
+====================================================================================================
+DocumentCompactor: recursive driver that descends JSON and replaces bulky leaves in place, preserving
+shape + key order. Owns NO compaction logic (reuses compact/Formatter/classify_cell). The recurse-
+before-compact array ordering is the load-bearing invariant (deep nesting cascades). FOCUS NOTE:
+dotted-flatten is NOT here (in compactor/IR/formatter); walker is purely walk/replace.
+
+-- publicApi --
+  * DocumentCompactor struct { Config CompactConfig; Formatter Formatter; CcrStore ccr.Store /*nilable*/ }.
+  * (d *DocumentCompactor) Compact(doc any) any — same shape, compactable spots replaced; key order
+    preserved.
+  * CompactDocument(doc any) any — convenience: default config + CSV-schema + no store.
+  * TryParseJSONContainer(s string) (parsed any, ok bool) — parse ONLY if first non-whitespace '{'/'['
+    AND parses to object/array; else ok=false (bare scalars never recurse).
+  * EmitOpaqueCCRMarker(payload string, kind OpaqueKind, store ccr.Store) string — comma/cell-form
+    <<ccr:HASH,KIND,SIZE>>; if store!=nil stash under HASH (hash identical regardless of store). KIND
+    from OpaqueKind, SIZE = humanized byte length.
+  * with_formatter / with_config / with_ccr_store — fluent setters (non-behavioral).
+
+-- constants --
+  SHA hash prefix bytes = 6 (Rust: SHA-256 first 6 bytes -> 12 hex; Go REUSES ccr.ComputeKey = BLAKE3
+  first 12 bytes / 24 hex); humanize threshold 1024; humanize precision 1 decimal; container-detect
+  first chars '{'/'['; OpaqueKind->string Base64Blob="base64", LongString="string", HtmlChunk="html",
+  Other(s)=s.
+-- algorithm --
+  compact_document(doc): DocumentCompactor default config + CSV-schema + no store; return walk(doc).
+  walk(v): Object->walk_object; Array->walk_array; String->walk_string; scalar->unchanged.
+  walk_object(map): NEW object SAME key order; each value replaced with walk(value). Empty stays empty.
+  walk_array(items): RECURSE FIRST — map every item through walk() into `inner` (new slice, same
+   length/order). THEN compact(inner, config); if was_compacted() replace whole array with single
+   String = formatter.format(IR); else return Value::Array(inner).
+  walk_string(s): (1) try_parse_json_container(s) -> parsed object/array: walk(parsed). If recursion
+   produced Value::String(rendered) return that string. Else re-serialize recursed value compact
+   (serde to_string), return as String; on serialize fail fall back to ORIGINAL s. (2) else
+   classify_cell(String(s), config.classify); if Opaque(kind) return emit_opaque_ccr_marker(s, kind,
+   store). (3) else return s unchanged.
+  emit_opaque_ccr_marker(payload, kind, store): SHA-256(payload), first 6 bytes hex -> 12-char hash;
+   if store present store.put(hash, payload); kind map; return "<<ccr:HASH,KIND,SIZE>>" SIZE=humanize(
+   len(payload)) BYTES.
+  humanize(n): n<1024 -> "{n}B"; kb=n/1024.0, kb<1024.0 -> "{kb:.1}KB"; else "{kb/1024:.1}MB".
+-- markers --
+  "<<ccr:HASH,KIND,SIZE>>" (comma/cell form ONLY). e.g. <<ccr:abc123def456,base64,512B>>. SIZE
+  humanized (NB / X.XKB / X.XMB). Does NOT emit canonical or space-form.
+-- mvp/deferred --  Entire walker.rs MVP and self-contained. NOTE: task brief lists stringified-JSON
+  nesting DEFERRED, but walker implements it inline via try_parse_json_container + recurse — CONFIRM
+  whether to include or stub walk_string's container branch for MVP. Heavy pieces (Kneedle/SmartSample/
+  Buckets) elsewhere. Dotted-flatten NOT here.
+-- edgeCases --
+  - Empty object {} unchanged. Empty array [] -> compact declines -> empty unchanged. Array of scalars
+    -> declines -> unchanged after recursion.
+  - Pure-scalar object fully unchanged (short string not opaque/container).
+  - Malformed stringified JSON -> try_parse None -> classify non-opaque -> unchanged.
+  - Bare-scalar string parsing as JSON ("123","true") -> None (first char not {/[) -> NOT recursed.
+  - Container parsed but recursion didn't compact -> RE-SERIALIZE compact (may differ from original
+    whitespace); on serialize fail return original s.
+  - Cascading nesting: rows holding stringified-JSON payload -> recurse items first -> each payload
+    becomes rendered sub-table string -> outer compact builds table whose payload column holds CSV-
+    quoted inner renderings.
+  - Key/element ORDER always preserved (deterministic columns + orderedmap).
+  - Opaque blob detection depends on classify_cell + config.classify (classifier sibling).
+-- goPortNotes --
+  FOCUS MISMATCH: dotted flatten NOT here (compactor/IR/formatter). Walker is pure walk/replace driver.
+  ORDERING invariant: preserve key/element order (orderedmap, map[string]any BANNED); recurse items
+  BEFORE compact. CCR MARKER: Rust comma-form HASH=SHA-256 first-6 (12 hex), SIZE=humanized; Go REUSE
+  ccr.MarkerForCell + ccr.ComputeKey (BLAKE3, 24-hex). TWO divergences for integrator: (1) Go
+  MarkerForCell takes size as int (renders bytes count) vs Rust humanized string — decide keep int or
+  change builder; (2) hash algo BLAKE3 vs SHA-256 — keep BLAKE3. Comma-form (cell) builder ONLY — do
+  NOT unify with canonical/space-form. len() BYTE count (humanize). walk() distinguish
+  *orderedmap.OrderedMap (object) / []any (array) / string / scalar; preserve nil/numbers. Store
+  OPTIONAL (nilable ccr.Store; only Put when non-nil; hash computed identically). Non-compacting
+  container recursion: marshal via orderedmap MarshalJSON (preserve order, SetEscapeHTML(false)
+  consideration). try_parse parses FULL ORIGINAL; {/[ guard on trim_start copy. config.classify from
+  classifier.rs sibling.
+
+
+====================================================================================================
+SUBSYSTEM: compaction/compactor.rs   ->   internal/smartcrusher/compaction/compactor.go   fetchedOk= True
+====================================================================================================
+TabularCompactor: &[Value] array -> Compaction IR (Untouched | Table | Buckets). Heart of lossless
+compaction-table build. Heterogeneous branch (detect_discriminator + bucket_by + Buckets) DEFERRED —
+for MVP fall through to build_homogeneous_table when core_ratio low (Rust already falls through when no
+discriminator). DISCREPANCY: Default heterogeneous_core_ratio=0.6 (DOC says 0.5 — use 0.6). NO float-
+parity here.
+
+-- publicApi --
+  * CompactConfig struct { Classify ClassifyConfig; MinItems int; CoreFieldFraction float64;
+    HeterogeneousCoreRatio float64; MaxFlattenInnerKeys int; MinBuckets int; MaxBuckets int } +
+    DefaultCompactConfig() (MinItems=2, CoreFieldFraction=0.8, HeterogeneousCoreRatio=0.6,
+    MaxFlattenInnerKeys=6, MinBuckets=2, MaxBuckets=8, Classify default).
+  * Compact(items []Value, cfg CompactConfig) Compaction.
+  * computeKeyFreqs (internal; BTreeMap sorted -> deterministic).
+  * buildHomogeneousTable, cellFromValue, hashOpaque, flattenUniformNested, typeTagFor/inferTypeTag/
+    inferTypeTagFromCells (internal).
+
+-- constants --
+  MinItems=2; CoreFieldFraction=0.8 (core if freq >= ceil(total*0.8)); HeterogeneousCoreRatio=0.6
+  (CODE; DOC 0.5 — TRUST 0.6); MaxFlattenInnerKeys=6; MinBuckets=2 (DEFERRED); MaxBuckets=8 (DEFERRED);
+  discriminator reject ratio 0.7 (DEFERRED); JsonArray/StringifiedJson recurse min len=2; hash_opaque
+  prefix 6 bytes -> 12 hex; flatten placeholder type_tag="string"; missing-bucket-key="__missing__"
+  (DEFERRED).
+-- algorithm --
+  compact(items, cfg):
+   Step1 untouched gates: if len<MinItems(2) -> Untouched(Array(items)); if NOT every item object ->
+    Untouched(Array(items)).
+   Step2 key freqs: compute_key_freqs -> BTreeMap<string,usize> (DISTINCT rows containing key).
+   Step3 core ratio: total=len; core_threshold=ceil(total*CoreFieldFraction); core_count = #keys with
+    freq>=core_threshold; total_keys=#distinct; core_ratio = (total_keys==0 ? 1.0 : core_count/
+    total_keys).
+   Step4 heterogeneous (DEFERRED): if core_ratio < HeterogeneousCoreRatio(0.6): detect_discriminator;
+    if Some -> bucket_by [DEFERRED]; if None FALL THROUGH to build_homogeneous_table. MVP: skip
+    discriminator entirely, always fall through.
+   Step5: build_homogeneous_table(items, key_freqs, cfg).
+  build_homogeneous_table: (A) ordered_keys sorted by DESC frequency, ties ASC name (b.freq.cmp(a.freq)
+   then a.name.cmp(b.name)). (B) field_specs: FieldSpec{name, type_tag=infer_type_tag(items,key),
+   nullable = (freq<total) OR (any row has key with explicit null)}. (C) rows = build_row per item.
+   (D) flatten_uniform_nested(&mut specs, &mut rows, cfg). (E) Table{schema, rows, original_count=len}.
+  build_row(item, ordered_keys, cfg): not object -> empty cells. Else for each k: missing -> Missing;
+   else cell_from_value(obj[k], cfg). Cell order = ordered_keys order, 1:1 with schema.
+  cell_from_value(v, cfg): classify_cell(v, cfg.Classify): Scalar->Scalar(clone). JsonObject->
+   Scalar(clone) (flatten may promote later). JsonArray-> if Array AND every elem object AND len>=2:
+   Nested(compact(inner)); else Scalar(clone). StringifiedJson(parsed) [DEFERRED class]-> if Array
+   all-objects len>=2: Nested(compact(parsed)); else Scalar(parsed). Opaque(kind)-> if String s:
+   OpaqueRef{ccr_hash=hash_opaque(s.bytes), byte_size=len(s.bytes) BYTES, kind}; if NOT string:
+   Scalar(clone).
+  hash_opaque(bytes): SHA-256, FIRST 6 bytes, lowercase %02x -> 12-char hex (NOT 12 bytes).
+  flatten_uniform_nested(specs, rows, cfg): iterate column i upward (specs grows). inner_keys=
+   uniform_object_keys(specs, rows, i); proceed ONLY if Some, non-empty, len<=MaxFlattenInnerKeys(6).
+   parent_name=specs[i].name. new_specs: FieldSpec{name=parent_name+"."+k, type_tag="string"
+   placeholder, nullable=false} per inner key. Splice specs (replace specs[i] with new_specs). Per row:
+   remove cell i; if Scalar(Object(map)) inner_obj=map; if Missing inner_obj=None; ANY OTHER
+   unreachable. expanded: per inner key -> None->Missing; map lacks k->Missing; else Scalar(clone
+   map[k]). Insert expanded at i..i+n_new-1. Refine each new column via infer_type_tag_from_cells.
+   Advance i+=n_new. ONE level per pass; dotted columns skipped (contain '.').
+  uniform_object_keys(specs, rows, col): if specs[col].name contains '.' -> None. canonical=None;
+   saw_object=false. Per row: cell at col (absent -> None). Missing -> continue. Scalar(Object(map)):
+   keys in map order; saw_object=true; canonical None->set, else canonical!=keys (ORDERED equality) ->
+   None. Any other -> None. After: !saw_object -> None else canonical.
+  infer_type_tag_from_cells(rows, col): tag="string"; saw_value=false; nullable=false. Per row cell at
+   col: Missing->nullable=true. Scalar(Null)->nullable=true. Scalar(non-null)-> if !saw_value{tag=
+   type_tag_for(v); saw_value=true} else if type_tag_for(v)!=tag {tag="json"}. Nested/OpaqueRef->
+   tag="json". Return (tag, nullable).
+  infer_type_tag(items, key): tag=None. Per object item containing key: v=obj[key]; Null skip; t=
+   type_tag_for(v); tag None->Some(t) else if !=t -> "json" and BREAK. unwrap_or("string").
+  type_tag_for(v): Null->"null"; Bool->"bool"; Number is_i64||is_u64->"int"; other Number->"float";
+   String->"string"; Object|Array->"json".
+  detect_discriminator/bucket_by: DEFERRED (see consolidated table constants).
+-- markers --  NONE directly. Produces CellValue::OpaqueRef{ccr_hash(12 hex), byte_size(bytes), kind}.
+  Comma-form <<ccr:HASH,KIND,SIZE>> rendered LATER by formatter.
+-- mvp/deferred --  MVP: untouched gates, compute_key_freqs, core-ratio, build_homogeneous_table
+  (column union + freq/alpha ordering + type inference + nullable), build_row + cell_from_value,
+  hash_opaque, flatten_uniform_nested + uniform_object_keys + infer_type_tag(_from_cells) + type_tag_for.
+  DEFERRED: detect_discriminator + bucket_by + Buckets. StringifiedJson branch DEFERRED at classifier.
+-- edgeCases --
+  - len<2 OR any non-object -> Untouched(Array). Empty -> Untouched.
+  - core_threshold CEIL: total=3 -> ceil(2.4)=3 (must appear in all 3); total=5 -> ceil(4.0)=4.
+  - core_ratio when total_keys==0 hardcoded 1.0 (all-empty objects -> homogeneous table zero fields).
+  - Field ordering DESC freq then ASC name (deterministic).
+  - nullable iff sparse (freq<total) OR any present explicit null.
+  - Flatten only when EVERY non-missing cell is Object with EXACT SAME ORDERED key set, >=1 object,
+    inner key count 1..=6. Mixed/diff inner sets -> stays nested.
+  - uniform_object_keys None if a row lacks cell at col (ragged; defensive).
+  - Already-dotted columns skipped (no double-flatten/recursion same pass).
+  - Inner key sets compared by ORDERED slice equality (different insertion order -> NON-uniform). Mirror
+    serde Map / orderedmap insertion order.
+  - Opaque cell only when value String; non-string Opaque -> Scalar(clone). byte_size BYTE length.
+  - Recursion: JsonArray/StringifiedJson -> compact recursively (Nested may be Untouched/Table/Buckets).
+    No explicit depth guard here (MAX_DEPTH elsewhere).
+  - type_tag int vs float via is_i64/is_u64; 1.0 float, 1 int; huge ints beyond i64/u64 -> float.
+-- goPortNotes --
+  orderedmap (map[string]any BANNED); key iteration order preserved (uniform_object_keys ORDERED
+  slices). byte_size = len(string) BYTES. compute_key_freqs BTreeMap key-sorted; replicate before DESC
+  sort (tie ASC name). core_threshold = int(math.Ceil(float64(total)*CoreFieldFraction)) — NOT integer
+  tricks; FP edge total*0.8 for 5 = 4.0 exactly. type_tag int-vs-float: mirror serde Number::is_i64()||
+  is_u64() — preserve raw token (json.Number / UseNumber). THREE marker forms separate — only feeds
+  comma-form via OpaqueRef. hash_opaque: sha256.Sum256(b); hex.EncodeToString(sum[:6]) = 12-char prefix.
+  flatten_uniform_nested: rebuild specs + row cells (preserve dotted-column order in parent slot).
+  Unreachable arm = invariant from uniform_object_keys (panic/defensive). Heterogeneous branch out of
+  MVP but leave seam (TODO + core_ratio). Renderer (IR -> CSV + 0.30 gate) is separate unit.
+
+====================================================================================================
+SUBSYSTEM: compaction/formatter.rs   ->   internal/smartcrusher/compaction/formatter.go   fetchedOk= True
+====================================================================================================
+RENDERING layer: walks a Compaction IR tree -> bytes. Does NOT contain the 0.30 savings gate (that's
+upstream in compactor/orchestrator). Three impls: JsonFormatter, CsvSchemaFormatter (headline MVP),
+MarkdownKvFormatter (opt-in). All share ONE comma-form CCR marker (SIZE humanized B/KB/MB).
+
+-- publicApi --
+  * Formatter interface { Name() string; Format(c *Compaction) string; EstimateBytes(c *Compaction) int }
+    — Name stable tag ("json","csv-schema","markdown-kv"). EstimateBytes default = len(Format(c))
+    (tested invariant; no Go default methods -> per-struct method or estimateBytes(f,c) helper).
+  * CsvSchemaFormatter struct { IncludeDropSummary bool } // Name()="csv-schema" — MVP default. Emits
+    [N]{col:type[?],...} declaration line + one CSV row per kept row. IncludeDropSummary (default false)
+    appends " __dropped:K" when rows.len()<original_count.
+  * JsonFormatter struct { Pretty bool } // Name()="json" — wrapper keys _compaction/_schema/_kept/
+    _total/_rows. Needed by CSV+KV nested-cell rendering.
+  * MarkdownKvFormatter struct { IncludeDropSummary bool } // Name()="markdown-kv" — opt-in secondary.
+  * formatCcrMarker(hash string, byteSize int, kind OpaqueKind) string — COMMA-FORM <<ccr:HASH,KIND,
+    SIZE>>; SIZE=humanizeBytes(byteSize). SEPARATE builder.
+  * humanizeBytes(n int) string — n<1024 "{n}B"; n/1024<1024 "{kb:.1}KB"; else "{mb:.1}MB".
+  * jsonScalarToCsv(v) string — null->"" ; bool->true/false; number->string form; string->raw unless
+    needsCsvQuote then csvQuote; object/array->csvQuote(compact-json).
+  * csvQuote(s string) string — RFC-4180: wrap in double quotes, double internal `"`; no other escaping.
+
+-- constants --
+  CCR comma-form template <<ccr:{HASH},{KIND},{SIZE}>>; OpaqueKind tags base64|string|html|<Other(s)>;
+  declaration grammar [{N}]{col0:type0[?],...} (N=rows.len() KEPT, trailing ? iff nullable, single
+  comma joins); humanize thresholds 1024/1024.0; humanize precision 1 decimal; drop-summary
+  " __dropped:{K}" (K=original_count-rows.len(); leading space; only when IncludeDropSummary && rows<
+  original); buckets tokens "__buckets:{disc}\n  " / "__key:{scalar}\n" (DEFERRED); KV row markers
+  "- "(first), "  "(subsequent 2 spaces), "-\n"(all-missing); JSON table keys _compaction="table",
+  _schema,_kept,_total,_rows; JSON ccr cell keys _ccr,_size,_kind (node-level OpaqueRef uses
+  _compaction="ccr",_hash,_size,_kind — DIFFERENT); schema field key "type" + "nullable":true only when
+  true.
+-- algorithm --
+  Formatter: Name/Format/EstimateBytes; EstimateBytes default = len(Format(c)) BYTE count (tested ==).
+  DISPATCH: Table{schema,rows,original_count}, Buckets{...} (DEFERRED), OpaqueRef{ccr_hash,byte_size,
+   kind}, Untouched(value). Untouched -> compact JSON. Top-level OpaqueRef -> comma-form marker.
+  CSV write_table: '[' + rows.len() + "]{" ; each field "name:type_tag" + "?" iff nullable ; join
+   columns single ',' ; '}' ; if IncludeDropSummary && rows<original: " __dropped:" + (original-rows) ;
+   '\n'. Rows: each cell via format_cell, join ',', push, '\n'. N == rows.len() == emitted row lines.
+  CSV format_cell: Missing->""; Scalar(v)->json_scalar_to_csv(v); Nested(sub)->csv_quote(JsonFormatter
+   {}.Format(sub)); OpaqueRef->format_ccr_marker(hash,byte_size,kind).
+  json_scalar_to_csv: Null->""; Bool->true/false; Number->string form; String s-> needs_csv_quote ?
+   csv_quote(s) : s; object/array->csv_quote(compact-json).
+  needs_csv_quote(s): contains ',' '"' '\n' '\r'.
+  csv_quote(s): '"' + s.replace(`"`->`""`) + '"' (newlines/commas literal inside quotes).
+  format_ccr_marker(hash, byte_size, kind): kind_str base64|string|html|Other(s); "<<ccr:" + hash +
+   "," + kind_str + "," + humanize_bytes(byte_size) + ">>".
+  humanize_bytes(n): n<1024 itoa(n)+"B"; kb=n/1024.0; kb<1024.0 -> 1dp + "KB"; else mb=kb/1024.0 -> 1dp
+   + "MB".
+  JsonFormatter.Format: compaction_to_json then compact (single line unless Pretty). Table ->
+   {_compaction:"table", _schema:schema_to_json, _kept:rows.len(), _total:original_count, _rows:[...]}.
+   OpaqueRef node -> {_compaction:"ccr",_hash,_size,_kind}. Untouched -> verbatim. schema_to_json: array
+   {name, type:type_tag} + "nullable":true only if nullable. cell_to_json: Scalar->verbatim;
+   Missing->null; Nested->compaction_to_json; OpaqueRef CELL -> {_ccr,_size,_kind}.
+  MarkdownKvFormatter write_kv_table: same declaration EXCEPT field names via kv_field_name. Per row:
+   zip schema.fields with cells. Non-Missing cell rendered (Scalar->kv_scalar, Nested->inline JSON,
+   OpaqueRef->format_ccr_marker), prefix "- " first written else "  " (2 spaces), then kv_field_name +
+   ": " + rendered + '\n'. Missing skipped. All-missing -> "-\n".
+  kv_scalar: Null->"null" (literal, UNLIKE CSV empty); Bool->true/false; Number->string; String s->
+   needs_kv_quote ? JSON-string-quote(s) : s; object/array->compact JSON.
+  needs_kv_quote(s): empty OR '\n' OR '\r' OR leading/trailing whitespace.
+  kv_field_name(name): needs_kv_quote(name) OR contains ": " -> JSON-string-quote(name) else raw.
+  Buckets arm (CSV & KV, DEFERRED): "__buckets:"+disc; optional " __dropped:"+delta; '\n'; per bucket
+   "__key:"+scalar(key)+'\n' then write_table. MVP: minimal stub/unreachable.
+-- markers --  <<ccr:HASH,KIND,SIZE>> comma-form ONLY (KIND base64|string|html|<other>; SIZE humanized).
+  Does NOT emit canonical or space-form.
+-- mvp/deferred --  MVP: CsvSchemaFormatter (write_table/format_cell/json_scalar_to_csv/needs_csv_quote/
+  csv_quote), format_ccr_marker comma-form, humanize_bytes, Formatter interface + EstimateBytes==len
+  invariant, JsonFormatter (nested-cell dependency + debug default). MarkdownKvFormatter opt-in/
+  secondary. DEFERRED: Buckets arms; IncludeDropSummary low-priority. NOT here: 0.30 gate, dotted
+  flatten, field_detect, crushability, SmartSample.
+-- edgeCases --
+  - EstimateBytes MUST == len(Format(c)) exactly (two tests).
+  - [N] = rows.len() (KEPT) NOT original_count; original_count only feeds __dropped:K. row lines == N.
+  - Missing: CSV empty string between commas (a,,c); KV line omitted entirely.
+  - Null scalar: CSV "" ; KV literal "null". Do NOT unify.
+  - All-missing KV row -> bare "-\n" (row count matches [N]).
+  - CSV nested cell = JsonFormatter output then csv_quote'd whole; KV nested = inline JSON NOT quoted.
+  - csv_quote doubles internal double-quotes only; newlines/CR literal inside quotes.
+  - needs_csv_quote: , " \n \r. needs_kv_quote: empty / \n / \r / leading-or-trailing whitespace (NOT
+    commas/quotes).
+  - kv_field_name quotes if needs_kv_quote OR contains ": ".
+  - TWO ccr JSON key sets: node-level {_compaction:"ccr",_hash,_size,_kind}; cell-level {_ccr,_size,
+    _kind}. Don't conflate _hash vs _ccr.
+  - schema_to_json key "type" (not type_tag); "nullable":true only when true.
+  - nullable field declaration appends trailing ? (name:type?).
+  - humanize_bytes exactly 1024 -> KB branch; boundary kb==1024.0 -> MB branch.
+  - String number rendering preserves original literal (json.Number); don't reformat floats.
+  - Untouched/object-array fallback compact JSON; serialize failure -> "" (unwrap_or_default).
+-- goPortNotes --
+  Build JSON via orderedmap (wrapper-key order stable; map[string]any BANNED). .len() BYTE counts;
+  EstimateBytes len(string). csv_quote: Replace `"`->`""` wrapped in quotes (equivalent to char
+  iteration). needs_kv_quote leading/trailing via first/last rune unicode.IsSpace. Number: decode
+  UseNumber() so 1 stays "1", 1.5 "1.5" (do NOT FormatFloat). humanize float: strconv.FormatFloat(kb,
+  'f',1,64) or %.1f; Decision B no exact rounding. THREE marker builders separate (this file comma-form
+  only; formatCcrCell(hash,kind,size); keep canonical/space-form elsewhere). OpaqueKind kindTag()
+  shared by marker + JSON opaque_kind_str. No default methods -> EstimateBytes method per struct or
+  package func. debug_assert row.len()==schema.fields.len() (zip by index, safe). MVP: CsvSchema +
+  JsonFormatter(nested dep) + formatCcrMarker + helpers; stub MarkdownKv + Buckets. Wire CsvSchema as
+  render step; seam unaffected. Untouched/fallback marshal -> "" on error.
+
+
+====================================================================================================
+SUBSYSTEM: smart_crusher/crushers.rs   ->   internal/smartcrusher/crushers.go   fetchedOk= True
+====================================================================================================
+Three 'universal crushers' + compute_k_split + small math helpers. ENTIRE FILE DEFERRED for Plan 3 MVP:
+every public fn depends on compute_optimal_k (Kneedle + SimHash + zlib, DEFERRED). SmartSample lossy
+fallback is NOT here (it's in the orchestrator). NO CCR markers (grep ccr = 0). MVP carve-out: the
+small statistical helpers + outlier/anomaly patterns are MVP-SHARED.
+
+-- publicApi --
+  * compute_k_split(items []&str, config, bias) (k_total, k_first, k_last, k_importance int) — DEFERRED.
+    BUG#4-clamped (k_first=min(raw,k_total); k_last=min(raw,k_total-k_first)).
+  * crush_string_array(items []&str, config, bias) (Vec<String>, String) — DEFERRED.
+  * crush_number_array(items []Value, config, bias) (Vec<Value>, String) — DEFERRED.
+  * crush_object(obj orderedmap, config, bias) (orderedmap, String) — DEFERRED.
+
+-- constants --
+  n<=8 passthrough threshold; min_k=3; change-point window=5; change-point n guard n>10; object small-
+  value token threshold 50/4=12; object token estimate len(val_json)/4 + len(key)/4 + 2 (BYTE, int div);
+  max_items_after_crush (>0 cap); first_fraction (~0.30); last_fraction (~0.15); variance_threshold;
+  min_tokens_to_crush (200); preserve_change_points; percentile quantiles 0.25/0.75; MAX_DEPTH=50 (NOT
+  here, spec).
+-- algorithm -- (recorded for fidelity; all DEFERRED except MVP-shared helpers)
+  compute_k_split: max_k = max_items_after_crush if >0 else None; k_total=compute_optimal_k(items,bias,
+   3,max_k); k_first_raw=max(1,round_ties_even(k_total*first_fraction)); k_last_raw=max(1,
+   round_ties_even(k_total*last_fraction)); BUG#4 clamp k_first=min(k_first_raw,k_total); k_last=min(
+   k_last_raw, k_total-k_first saturating); k_importance=k_total-(k_first+k_last) saturating. round_
+   ties_even = banker's.
+  crush_string_array: n<=8 -> (copy,"string:passthrough"). compute_k_split. error_indices sorted (any
+   ERROR_KEYWORDS substring lowercased). length-anomaly lengths[i]=CHARACTER count (chars().count());
+   if len>1 mean_len/std_len; if std_len>0 threshold=variance_threshold*std_len; anomaly={i:|len-mean|>
+   threshold}. first 0..min(k_first,n); last (n-k_last)..n saturating. keep=union sorted. seen=items[i].
+   stride-fill: remaining=k_total-len(keep); if>0 stride=max(1,(n-1)/(remaining+1)); cap=k_total+#error+
+   #anomaly; i=0 while i<n: if len(keep)>=cap break; if i not in keep: if items[i] not in seen add else
+   dedup_count++; i+=stride. result=items[i] sorted keep (ORIGINAL order). strategy "string:adaptive
+   (N->R[,dedup=D][,errors=E])".
+  crush_number_array: n<=8 -> (copy,"number:passthrough"). finite=[as_f64 v if finite]; empty ->
+   (copy,"number:no_finite"). item_strings=[v.to_string()]; compute_k_split. mean/median; std if len>1.
+   sorted_finite; p25/p75 percentile_linear (BUG#1). outliers if std>0: |num-mean|>variance_threshold*
+   std. change_indices if preserve_change_points AND n>10: window=5, left items[i-5..i] right
+   items[i..i+5]; if both nonempty and std>0 and |mean(right)-mean(left)|>variance_threshold*std add i.
+   first/last; keep=union sorted. stride-fill: cap=k_total+#outliers (NO change/anomaly term). kept
+   values clone original order. strategy carries min/max (format_number_repr) + mean/median/stddev/p25/
+   p75 (format_g) + [,outliers=O][,change_points=C].
+  crush_object: n<=8 -> (clone,"object:passthrough"). per (key,val): val_str compact JSON; tokens=
+   len(val_str)/4 + len(key)/4 + 2 (int div, BYTE); total_tokens. if total_tokens<min_tokens_to_crush
+   -> passthrough. kv_strings "<key>: <compactJSON>"; k_total=compute_optimal_k(...). if k_total>=n ->
+   passthrough. keep_keys: error-keyword values; small-value (tokens<=12); first k_first + last k_last
+   by INSERTION ORDER (RAW k_first/k_last, NOT compute_k_split clamp). stride-fill: remaining; stride;
+   recompute error_kept_count each iter; if len>=k_total+error_kept_count break; add keys[i]. result =
+   insertion-order keys in keep_keys. strategy "object:adaptive(N->R keys)".
+  MVP-SHARED HELPERS (port now): percentile_linear(sorted,q): n==0->0; n==1->sorted[0]; pos=q*(n-1);
+   lo=floor(pos); hi=lo+1 if<n else lo; frac=pos-lo; sorted[lo]*(1-frac)+sorted[hi]*frac. round_ties_
+   even = banker's. format_number_repr(x): nan->"nan"; +inf->"inf"; -inf->"-inf"; integer-valued &
+   |x|<1e16 -> int form; else shortest round-trip float. finite_min/finite_max default 0.0.
+-- markers --  n/a (grep ccr = 0).
+-- mvp/deferred --  ENTIRE FILE DEFERRED (depends on compute_optimal_k). MVP carve-out: percentile_
+  linear, round_ties_even, format_number_repr, mean +/- variance_threshold*sample_stdev outlier/anomaly
+  patterns (worth porting for SmartSample/anchor/outlier in orchestrator).
+-- edgeCases --
+  - n<=8 -> bare ':passthrough'. crush_number n>8 zero finite -> "number:no_finite".
+  - crush_object TWO extra passthroughs: total_tokens<min_tokens_to_crush, k_total>=n.
+  - BUG#4 clamp (k_total==1 -> k_first=k_last=1 sum 2>1; clamp). Mostly theoretical (n<=8 passthroughs
+    first). PORT THE CLAMP.
+  - BUG#1: p25/p75 linear interp. sorted [1..9](n=9): p25=3, p75=7. [10..100](n=10): p25=32.5, p75=77.5.
+  - length-anomaly CHARACTER count (rune correct here). Contrast object token estimate BYTE len.
+  - stride=max(1,(n-1)/(remaining+1)) int div, can be 1; remaining==0 skips stride-fill.
+  - cap differences: string=k_total+#errors+#anomalies; number=k_total+#outliers; object=k_total+#error-
+    kept (RECOMPUTED each iter).
+  - crush_object uses RAW k_first/k_last (no compute_k_split, no BUG#4 clamp).
+  - Output ordering: string/number ORIGINAL index order; object KEY INSERTION order.
+  - format_number_repr: integer-valued floats |x|<1e16 print as int; nan/inf literals. min/max use it;
+    mean/median/stddev/p25/p75 use format_g.
+-- goPortNotes --
+  WHOLE FILE DEFERRED (compute_optimal_k -> Kneedle). DO port helpers if SmartSample/anchor/outlier
+  needs: percentile_linear, round_ties_even (math.RoundToEven), format_number_repr, finite_min/max,
+  outlier/length-anomaly patterns. BYTE vs RUNE: object token estimate BYTE (len); length-anomaly RUNE
+  (utf8.RuneCountInString). orderedmap for crush_object (preserve insertion; output insertion order).
+  NO CCR markers (markers=n/a). Decision B: don't replicate format_g/banker's/float-repr byte-exact
+  strategy strings (debug metadata). BUG#4 clamp preserved if ported. crush_object does NOT use
+  compute_k_split. ERROR_KEYWORDS from sibling. Cap-recompute in crush_object intentional (recompute
+  in-loop). Seam: orchestrator bridges per-shape crushing to content-level seam.
+
+
+====================================================================================================
+SUBSYSTEM: pipeline/offloads/json_offload.rs   ->   internal/offloads/json_offload.go   fetchedOk= True
+====================================================================================================
+THIN WRAPPER plugging SmartCrusher into the OffloadTransform contract. Pure wiring; heavy/deferred
+logic lives behind the Crusher.Crush seam. Existing Go port already faithful vs passthroughCrusher;
+Plan 3 only swaps the real smartcrusher into the constructor (ZERO changes elsewhere).
+
+-- publicApi --
+  * NewJsonOffload() *JsonOffload (Rust JsonOffload::new(config)) — real SmartCrusher (default) +
+    min_array_rows=5, saturation_rows=50. Rust with_crusher(crusher, config) for DI/tests.
+  * (*JsonOffload) Name() string -> "json_offload".
+  * (*JsonOffload) AppliesTo() []transform.ContentType -> [JsonArray].
+  * (*JsonOffload) Confidence() float32 -> 0.85.
+  * (o *JsonOffload) EstimateBloat(content string) float32 — cheap byte-scan [0,1]; no JSON parse.
+  * (o *JsonOffload) Apply(content string, ctx transform.CompressionContext, store ccr.Store)
+    (transform.OffloadOutput, error).
+
+-- constants --
+  NAME="json_offload"; CONFIDENCE=0.85 (float32); AppliesTo=[JsonArray]; Crush bias arg always 0.0;
+  min_array_rows=5; saturation_rows=50; min-rows gate separators<min_array_rows-1 (=4)->0.0; saturation
+  denom max(1,saturation_rows-1)=49; row-separator substrings "},{" / "}, {" / "},\n"; MD5 truncation
+  24; wrapper prefix "\n[json_offload CCR: hash=" suffix "]"; no-savings comparison >= .
+-- algorithm --
+  EstimateBloat: (1) content=="" -> 0.0. (2) trimmed=strings.TrimLeftFunc(content,unicode.IsSpace); if
+   NOT starts '[' -> 0.0 (only trimmed tested for prefix; separator counting runs over ORIGINAL). (3)
+   separators=countRowSeparators(content) over ORIGINAL. (4) if separators < min_array_rows-1 (=4) ->
+   0.0 (saturating). (5) saturation=max(1, saturation_rows-1)=49. (6) clamp(separators/saturation, 0,1).
+  countRowSeparators(content): Count(content,"},{") + Count(content,"}, {") + Count(content,"},\n").
+   No regex, no parse. Examples: ""->0; "[]"->0; "[{a:1}]"->0; "[{a:1},{a:2}]"->1; "[{a:1}, {a:2},
+   {a:3}]"->2.
+  Apply: (1) result=crusher.Crush(content, ctx.Query, 0.0) (bias ALWAYS 0.0; query forwarded verbatim).
+   (2) if !result.WasModified -> Skipped (wrap transform.ErrSkipped: "json_offload: smart crusher
+   returned passthrough"). (3) if len(result.Compressed) >= len(content) (BYTE) -> Skipped ("no savings
+   after crush") — store NOT written (gate before Put). (4) key = ccr.ComputeKeyMD5([]byte(content))
+   (lowercase hex MD5 first 24, over WHOLE ORIGINAL). (5) store.Put(key, content) (stash ORIGINAL in
+   ORCHESTRATOR store). (6) output = result.Compressed + "\n[json_offload CCR: hash=" + key + "]". (7)
+   return OffloadOutput.from_lengths(len(content), output, key); bytes_saved = max(0, len(content)-
+   len(output)) saturating.
+-- markers --  Emits NO <<ccr:...>> forms. ONE bespoke wrapper marker: "\n[json_offload CCR:
+  hash=<md5_hex_24>]". The three canonical CCR forms originate INSIDE SmartCrusher and pass through
+  verbatim inside result.compressed (informational at orchestrator level).
+-- mvp/deferred --  Entire wrapper MVP (already faithfully ported in Go). Deferred logic lives INSIDE
+  SmartCrusher behind the Crusher.Crush seam — this file agnostic. From this file's view: 100% MVP.
+-- edgeCases --
+  - Empty input -> EstimateBloat 0.0. Non-array (object/text/number) -> 0.0. Whitespace before '[' still
+    array. Below-min-rows (3 rows=2 seps<4) -> 0.0.
+  - Separator counting over ORIGINAL but '[' prefix over trimmed — keep asymmetry.
+  - saturating_sub: if min/saturation were 0 don't underflow (denom floored 1).
+  - Huge input clamps [0.99,1.0], no panic.
+  - Apply passthrough (WasModified=false) -> Skipped, store untouched (len 0).
+  - Apply modified but compressed >= original -> Skipped, store NOT written (len gate before Put).
+  - Non-JSON -> SmartCrusher passthrough -> Skipped (no separate parse guard).
+  - cache_key stable across stores/calls (pure fn of input bytes).
+  - Wrapper marker NOT a <<ccr:...>> form — do NOT route through ccr marker builders.
+  - Anchor test: row matching ctx.Query survives — SmartCrusher's responsibility; wrapper only forwards.
+-- goPortNotes --
+  Already-faithful Go port; Plan 3 swaps real SmartCrusher into ctor only, zero changes elsewhere.
+  Crush bias literal 0.0. len() BYTE. no-savings >= (equal also skips). ccr.ComputeKeyMD5 over whole
+  original. store.Put(key, ORIGINAL). bytes_saved saturating. Wrapper marker bespoke (not <<ccr:...>>).
+  Skipped wraps transform.ErrSkipped. EstimateBloat: trimmed-prefix vs original-separator-count
+  asymmetry. fromLengths(len(content), out, key).
+
+
+====================================================================================================
+SUBSYSTEM: PARITY_FIXTURES_AND_TESTS   ->   internal/smartcrusher/smartcrusher_parity_test.go   fetchedOk= True
+====================================================================================================
+TWO entry paths: (1) PR4 LOSSLESS-FIRST default SmartCrusher() -> uniform tabular dict arrays become a
+compacted CSV+schema string (strategy lossless:table*) when savings >= gate (config 0.15 / MVP 0.30
+effective); (2) legacy LOSSY path via without_compaction(cfg) or lossless_min_savings_ratio=0.99. ALL 9
+recorded fixtures were recorded against the LOSSY path (no lossless:table). Lossy crush_array drops
+rows, stashes FULL original in in-memory CCR store (12-hex hash), appends {"_ccr_dropped":"<<ccr:HASH
+N_rows_offloaded>>"} as last element; ccr_get returns byte-exact original. Decision B: assert
+losslessness via round-trip + ratio bounds, NOT byte-exact strategy strings.
+
+-- publicApi --
+  * NewSmartCrusher(cfg Config) *SmartCrusher — lossless-first default; empty in-memory CCR store.
+  * NewSmartCrusherWithoutCompaction(cfg Config) *SmartCrusher — lossy-only; ALL fixtures use this.
+  * Crush(content, query string, bias float64) CrushResult{Compressed, Original, WasModified, Strategy}.
+  * CcrGet(hash string) (string, bool) — byte-exact original under 12-hex hash.
+  * CcrLen() int — 0 fresh; unchanged by passthrough/empty; +1 per distinct offload; idempotent.
+  * CrushArrayJSON(content, query string, bias float64) ArrayCrushOut{Items, CcrHash *string,
+    DroppedSummary, StrategyInfo}.
+  * CompactDocumentJSON(content string) string — tabular sub-arrays compacted, blobs -> <<ccr:HASH,
+    base64,...>>.
+
+-- constants --
+  lossless_min_savings_ratio 0.30 (Go MVP) / test override 0.99; max_items_after_crush 15;
+  min_items_to_analyze 5 (bugs test 3); min_tokens_to_crush 200 (tests 0/10); first_fraction 0.3;
+  last_fraction 0.15; variance_threshold 2.0; dedup_identical_items true; preserve_change_points true;
+  CCR hash width 12 hex; MAX_DEPTH 50 (test 100-level); fixture count >=17.
+-- algorithm (cases) --
+  empty_array: '[]' -> '[]', strategy passthrough, was_modified FALSE (only false fixture).
+  short_array_passthrough: '[1, 2, 3]' -> '[1,2,3]' (whitespace normalized), passthrough, modified TRUE.
+  dict_array_30 (LOSSY): 30 dicts {id,status,msg}, error subset -> keep 15 (every error row forced),
+   sentinel <<ccr:89f81e97033e 15_rows_offloaded>>, strategy smart_sample(30->15). ROUND-TRIP CcrGet ==
+   original byte-exact.
+  dict_array_100_sequential (LOSSY): 100 dicts, level='warn' every 7th -> keep 15 warn rows
+   (0,7,...,98), sentinel <<ccr:1d0dd94cf2cd 85_rows_offloaded>>, smart_sample(100->15).
+  duplicate_dicts_40 (LOSSY dedup): 40 identical -> 1 kept + sentinel <<ccr:6155f8b8951e
+   39_rows_offloaded>>, smart_sample(40->1).
+  string_array_25 (LOSSY): 25 strings -> keep 15 (head-dense + strided + tail). strategy "string:
+   adaptive(25->15)(25->15)". NO _ccr_dropped sentinel (string path doesn't add one). DEFERRED — ratio-
+   bound only.
+  number_array_40_changepoint (LOSSY): -> keep 15 ALL NUMBERS (Bug#1 schema-preserving). strategy embeds
+   stats (number:adaptive(40->15,min=10,max=69,mean=...,...)). DEFERRED — assert all-numeric + len<=15 +
+   change region, NOT exact values.
+  mixed_array (LOSSY): 27 items -> 13 kept. strategy mixed:adaptive(27->13,str:7->7,num:20). DEFERRED —
+   ratio-bound.
+  nested_object_with_array (LOSSY): events array NOT crushed -> strategy skip:unique_entities_no_signal
+   (20->20), output whitespace-normalized original (modified TRUE due to reserialization).
+  lossless-default uniform tabular (DEFAULT): 50 {id,level:'info',msg:'ok'} -> CSV+schema string, len<
+   content, strategy startswith lossless:table, modified TRUE.
+  lossless-default below-threshold: 30 unique -> strategy != passthrough (lossy runs if lossless
+   declines).
+  CCR marker visible (default, ratio 0.99): result.compressed CONTAINS '<<ccr:' and 'rows_offloaded';
+   CcrGet(hash) != nil.
+  opaque blob in object (DEFAULT): blob field -> '<<ccr:HASH,base64,...>>'; CcrGet==blob byte-exact;
+   store +1.
+  compact_document_json blob/tabular: blob field startswith '<<ccr:' (store +1); events sub-array
+   becomes a STRING.
+  CCR roundtrip invariants: fresh len 0 + get None; passthrough/empty no growth; lossy grows >0;
+   idempotent (same hash); distinct payloads distinct hashes isolated; full element equality
+   json.loads(ccr_get)==original; kept inline rows verbatim subset AND len(kept)<len(original).
+  PARITY harness: replay each fixture through without_compaction(fixture.config); Go (Decision B): DO
+   NOT byte-match compressed/strategy for lossy adaptive; assert was_modified, passthrough/empty exact,
+   ratio bound (len(compressed)<=len(original) within ~10% recorded), round-trip losslessness.
+-- markers --
+  Sentinel last element {"_ccr_dropped":"<<ccr:HASH N_rows_offloaded>>"} (HASH 12 hex, N=dropped count).
+  Opaque blob "<<ccr:HASH,base64,...>>" (contains ",base64,"). Extraction regexes: array/strategy
+  <<ccr:([a-f0-9]+) ; blob <<ccr:([a-f0-9]+),base64,
+-- mvp/deferred --  MVP (has fixtures): empty/passthrough; dict smart_sample with dedup +
+  preserve_change_points + fractions + max_items cap; _ccr_dropped sentinel + in-memory CCR store
+  (hash/get/len/idempotency/isolation/round-trip); nested skip:unique_entities_no_signal; opaque blob
+  comma-form in objects; compact_document_json walker; number schema preservation (Bug#1); MAX_DEPTH=50;
+  lossless:table CSV+schema default + 0.30 gate; without_compaction opt-out. DEFERRED (ratio-bound only):
+  crush_string adaptive exact picks, crush_number Kneedle/full stats string, mixed/Buckets, TopN/
+  TimeSeries/ClusterSample, full compute_optimal_k, stringified-JSON nesting. Tool-name attribution tag
+  (smart_crush:<n>:<names>) is PIPELINE-layer, defer.
+-- edgeCases --
+  - '[]' -> passthrough, was_modified FALSE (ONLY false case).
+  - '[1,2,3]' below min_items -> passthrough but modified TRUE (whitespace-normalized reserialize).
+  - Whitespace normalization: compact output vs spaced input flips modified TRUE even when no drops.
+  - String-array lossy path does NOT append _ccr_dropped (dropped strings simply absent; may not be CCR-
+    recoverable; DEFERRED/ratio-only).
+  - Number output must stay entirely numeric (Bug#1 regression).
+  - Dedup collapses identical dicts before sampling (40->1).
+  - Change-point/rare-value preservation can dominate kept set (100 keeps 15 warn EXACTLY, ignoring
+    fractions).
+  - skip:unique_entities_no_signal leaves array intact, still re-serialized.
+  - Idempotency: re-crush identical -> no store growth (same hash). Distinct -> distinct hashes isolated.
+  - Forcing lossy: lossless_min_savings_ratio=0.99 OR without_compaction.
+  - 100-level nested returns unchanged past depth limit, no panic.
+  - Tool-name attribution dedupes repeated names, falls back to count-only smart_crush:<n>, skips
+    tool_calls/tool_use blocks missing id/name.
+-- goPortNotes --
+  Two constructors. Decision B acceptance tests: store 9 fixtures under testdata/, do NOT byte-compare
+  compressed/strategy for lossy adaptive; assert (1) was_modified exact; (2) empty+passthrough byte-
+  exact; (3) ratio bound len(compressed)<=len(original) within ~10%; (4) round-trip losslessness
+  (reconstruct from CcrGet == fixture input parsed); (5) kept inline rows verbatim subset. CCR store:
+  map[string]string keyed 12-hex; hash NOT pinned by Decision B — pick a stable hash (e.g. sha256 first
+  12 hex of canonical JSON), verify idempotency/isolation/round-trip rather than matching upstream
+  hashes (89f81e.../1d0dd9.../6155f8...). Fixture marker hashes will NOT match a different hash fn —
+  exclude sentinel marker from byte-compare OR compare structurally (prefix <<ccr:, suffix
+  N_rows_offloaded, N==dropped count). Sentinel shape load-bearing: last element {"_ccr_dropped":
+  "<<ccr:<hash> <N>_rows_offloaded>>"}; N==len(original)-len(kept-non-sentinel). Opaque blob
+  <<ccr:<hash>,base64,...>>; CcrGet byte-exact. Compact JSON serialize (Go json.Marshal no-space) ->
+  modified TRUE on reserialize of spaced input (compare against compact re-encode of input). Implement
+  crushability analyzer + field_detect gates: empty/short->passthrough; unique-no-signal->skip; uniform-
+  tabular->lossless (>=0.30) else lossy smart_sample. Number crusher all-numeric. String/number/mixed
+  deep sampling MVP-simplified (head/tail + forced anomalies), validated by ratio bounds. MAX_DEPTH=50
+  guard. Tool-name attribution -> pipeline transform-tag layer, defer. Place parity fixtures +
+  smartcrusher_parity_test.go loading testdata/fixtures/*.json; separate focused tests mirroring
+  ccr_roundtrip (store len/idempotency/isolation/round-trip) and lossless_default (uniform->lossless:
+  table; below-threshold never passthrough).
