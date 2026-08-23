@@ -193,3 +193,104 @@ func TestComputeFrozenCountNeverPanics(t *testing.T) {
 		})
 	}
 }
+
+// The messages warning must carry the index of the offending message, not a
+// placeholder, so a caller can point the customer at the block to move.
+func TestMessagesWarningCarriesMessageIndex(t *testing.T) {
+	body := `{"messages":[
+		{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral","ttl":"5m"}}]},
+		{"role":"user","content":[{"type":"text","text":"b"}]},
+		{"role":"user","content":[{"type":"text","text":"c","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`
+
+	_, warns := ComputeFrozenCount([]byte(body))
+	if len(warns) != 1 {
+		t.Fatalf("got %d warnings, want 1: %+v", len(warns), warns)
+	}
+	if warns[0].Index != 2 {
+		t.Errorf("warning Index = %d, want 2 (the index of the 1h marker)", warns[0].Index)
+	}
+}
+
+// system and tools are walked for TTL ordering too. They never raise the
+// floor, but a 5m-before-1h marker there is still worth a warning.
+func TestTTLOrderingInSystemAndTools(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{
+			name: "system out of order warns",
+			body: `{"system":[
+				{"type":"text","text":"s1","cache_control":{"type":"ephemeral","ttl":"5m"}},
+				{"type":"text","text":"s2","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+				"messages":[{"role":"user","content":[{"type":"text","text":"a"}]}]}`,
+			wantField: "system",
+		},
+		{
+			name: "tools out of order warns",
+			body: `{"tools":[
+				{"name":"t1","cache_control":{"type":"ephemeral","ttl":"5m"}},
+				{"name":"t2","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+				"messages":[{"role":"user","content":[{"type":"text","text":"a"}]}]}`,
+			wantField: "tools",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, warns := ComputeFrozenCount([]byte(tt.body))
+			if got != 0 {
+				t.Errorf("frozen count = %d, want 0: %s markers never raise the floor", got, tt.wantField)
+			}
+			if len(warns) != 1 {
+				t.Fatalf("got %d warnings, want 1: %+v", len(warns), warns)
+			}
+			if warns[0].Field != tt.wantField {
+				t.Errorf("warning Field = %q, want %q", warns[0].Field, tt.wantField)
+			}
+			if warns[0].Index != -1 {
+				t.Errorf("warning Index = %d, want -1 for a single-list field", warns[0].Index)
+			}
+			if warns[0].Msg == "" {
+				t.Error("warning Msg is empty")
+			}
+		})
+	}
+}
+
+// Correctly ordered system and tools markers must stay silent.
+func TestTTLOrderingInSystemAndToolsCorrectOrderDoesNotWarn(t *testing.T) {
+	body := `{"system":[
+		{"type":"text","text":"s1","cache_control":{"type":"ephemeral","ttl":"1h"}},
+		{"type":"text","text":"s2","cache_control":{"type":"ephemeral","ttl":"5m"}}],
+		"tools":[
+		{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}},
+		{"name":"t2","cache_control":{"type":"ephemeral","ttl":"5m"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"a"}]}]}`
+
+	if _, warns := ComputeFrozenCount([]byte(body)); len(warns) != 0 {
+		t.Errorf("expected no warnings for correct 1h-before-5m order, got %+v", warns)
+	}
+}
+
+// A 5m marker in system must not leak into the tools walk: the ordering rule
+// is per field.
+func TestTTLOrderingIsPerField(t *testing.T) {
+	body := `{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"5m"}}],
+		"tools":[{"name":"t","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`
+
+	if _, warns := ComputeFrozenCount([]byte(body)); len(warns) != 0 {
+		t.Errorf("a 5m marker in system must not warn about a 1h marker in another field, got %+v", warns)
+	}
+}
+
+// Content must be a block list. An object content is malformed Anthropic and
+// must not be walked as a single block, or a stray cache_control key would
+// freeze the message.
+func TestObjectMessageContentHasNoBlocks(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}}]}`
+	if got, _ := ComputeFrozenCount([]byte(body)); got != 0 {
+		t.Errorf("ComputeFrozenCount = %d, want 0", got)
+	}
+}
