@@ -134,8 +134,25 @@ func Dispatch(body []byte, opts Options) Result {
 		frozen, _ = cachecontrol.ComputeFrozenCount(body)
 	}
 
-	// Tasks 5-7 replace this with block planning, compression, and the
-	// splice. Until then the body is forwarded verbatim, which is what the
-	// I1 round-trip test in roundtrip_test.go pins.
-	return passthrough(body, ReasonNoLiveZone, frozen)
+	bodyStr := string(body)
+	msgIdx, ok := findLatestUserMessage(bodyStr, frozen)
+	if !ok {
+		return passthrough(body, ReasonNoLiveZone, frozen)
+	}
+
+	slots := planBlocks(bodyStr, msgIdx)
+	var candidates int
+	for _, s := range slots {
+		if s.kind == slotCompressible || s.kind == slotStringContent {
+			candidates++
+		}
+	}
+	if candidates == 0 {
+		return passthrough(body, ReasonNoCandidates, frozen)
+	}
+
+	// Task 6 compresses the candidates and Task 7 splices them. Until then
+	// the body is forwarded verbatim, which is what the I1 round-trip test
+	// in roundtrip_test.go pins.
+	return passthrough(body, ReasonNoCandidates, frozen)
 }
