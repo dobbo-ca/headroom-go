@@ -160,3 +160,36 @@ func TestDispatchReasonsOnBadInput(t *testing.T) {
 		})
 	}
 }
+
+// The Reason wire strings are what a caller logs and what an operator greps
+// for, so they are pinned by literal, not by the constant that defines them.
+func TestReasonWireValues(t *testing.T) {
+	for got, want := range map[Reason]string{
+		ReasonOK:           "ok",
+		ReasonNotJSON:      "not_json",
+		ReasonNoMessages:   "no_messages",
+		ReasonNoLiveZone:   "no_live_zone",
+		ReasonNoCandidates: "no_candidates",
+		ReasonAllRejected:  "all_rejected",
+	} {
+		if string(got) != want {
+			t.Errorf("Reason = %q, want %q", got, want)
+		}
+	}
+}
+
+// FrozenCount: -1 must actually derive the floor from the body's
+// cache_control markers, and any other value must be honoured verbatim.
+func TestDispatchFrozenCount(t *testing.T) {
+	marked := []byte(roundTripCorpus()["multi turn with markers"])
+
+	if got := Dispatch(marked, Options{FrozenCount: -1}).FrozenCount; got != 1 {
+		t.Errorf("derived FrozenCount = %d, want 1", got)
+	}
+	if got := Dispatch([]byte(roundTripCorpus()["minimal"]), Options{FrozenCount: -1}).FrozenCount; got != 0 {
+		t.Errorf("derived FrozenCount with no markers = %d, want 0", got)
+	}
+	if got := Dispatch(marked, Options{FrozenCount: 3}).FrozenCount; got != 3 {
+		t.Errorf("explicit FrozenCount = %d, want 3 (not re-derived)", got)
+	}
+}
