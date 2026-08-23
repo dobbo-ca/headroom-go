@@ -3,6 +3,8 @@ package livezone
 import (
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 // big builds a decoded string of exactly n bytes, so threshold boundaries can
@@ -208,5 +210,77 @@ func TestPlanBlocksOutOfRangeMessageIndex(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"a"}]}`
 	if slots := planBlocks(body, 5); len(slots) != 0 {
 		t.Errorf("got %d slots for an out-of-range index, want 0", len(slots))
+	}
+}
+
+// gjson reports Index 0 for a value whose offset it could not determine.
+// stringSlot must drop such a result: rewriting at offset 0 would overwrite
+// the body's opening brace and destroy the frozen prefix.
+func TestStringSlotRejectsUnknownOffset(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     gjson.Result
+		wantOK bool
+	}{
+		{"unknown offset is dropped",
+			gjson.Result{Type: gjson.String, Index: 0, Raw: `"abc"`, Str: "abc"}, false},
+		{"non string is dropped",
+			gjson.Result{Type: gjson.Number, Index: 10, Raw: `123`}, false},
+		{"located string is kept",
+			gjson.Result{Type: gjson.String, Index: 10, Raw: `"abc"`, Str: "abc"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start, end, text, ok := stringSlot(tt.in)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				if start != 0 || end != 0 || text != "" {
+					t.Errorf("rejected slot must be zeroed, got (%d,%d,%q)", start, end, text)
+				}
+				return
+			}
+			if start != tt.in.Index || end != tt.in.Index+len(tt.in.Raw) || text != tt.in.Str {
+				t.Errorf("got (%d,%d,%q), want (%d,%d,%q)",
+					start, end, text, tt.in.Index, tt.in.Index+len(tt.in.Raw), tt.in.Str)
+			}
+		})
+	}
+}
+
+// The threshold gate applies to string content too: a short legacy-shape
+// message is not a candidate.
+func TestPlanBlocksStringContentBelowThreshold(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":"` + big(BlockByteThreshold-1) + `"}]}`
+	slots := planBlocks(body, 0)
+	if len(slots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(slots))
+	}
+	if slots[0].kind != slotBelowThreshold {
+		t.Errorf("kind = %v, want slotBelowThreshold", slots[0].kind)
+	}
+}
+
+// The gate measures the DECODED text, not the raw byte span. A heavily
+// escaped block can occupy far more raw bytes than it decodes to, and the
+// compressor only ever sees the decoded form.
+func TestPlanBlocksThresholdMeasuresDecodedText(t *testing.T) {
+	decoded := strings.Repeat(`"`, 300)  // 300 decoded bytes
+	escaped := strings.Repeat(`\"`, 300) // 600 raw bytes
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"` + escaped + `"}]}]}`
+
+	slots := planBlocks(body, 0)
+	if len(slots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(slots))
+	}
+	if slots[0].text != decoded {
+		t.Fatalf("decoded text = %d bytes, want %d", len(slots[0].text), len(decoded))
+	}
+	if got := slots[0].end - slots[0].start; got <= BlockByteThreshold {
+		t.Fatalf("raw span %d must exceed the threshold for this test to bite", got)
+	}
+	if slots[0].kind != slotBelowThreshold {
+		t.Errorf("kind = %v, want slotBelowThreshold: the gate must use the decoded length", slots[0].kind)
 	}
 }

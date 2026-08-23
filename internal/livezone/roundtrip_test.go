@@ -193,3 +193,28 @@ func TestDispatchFrozenCount(t *testing.T) {
 		t.Errorf("explicit FrozenCount = %d, want 3 (not re-derived)", got)
 	}
 }
+
+// I2: a user message frozen by a cache_control marker is out of the live
+// zone. The floor must reach findLatestUserMessage — with the marked message
+// frozen there is no live zone at all, and Dispatch must say so rather than
+// plan the frozen message's blocks as candidates.
+func TestDispatchHonoursFrozenFloor(t *testing.T) {
+	// Message 0 is a marked, comfortably compressible user message;
+	// message 1 is an assistant turn, so nothing above the floor is live.
+	body := []byte(`{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"` + big(600) + `","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"assistant","content":"ok"}]}`)
+
+	if got := Dispatch(body, Options{FrozenCount: -1}); got.FrozenCount != 1 || got.Reason != ReasonNoLiveZone {
+		t.Errorf("derived floor: FrozenCount = %d, Reason = %q; want 1, %q",
+			got.FrozenCount, got.Reason, ReasonNoLiveZone)
+	}
+	if got := Dispatch(body, Options{FrozenCount: 1}).Reason; got != ReasonNoLiveZone {
+		t.Errorf("explicit floor 1: Reason = %q, want %q", got, ReasonNoLiveZone)
+	}
+	// Drop the floor and the same message becomes the live zone, which
+	// proves the floor is what excluded it above.
+	if got := Dispatch(body, Options{FrozenCount: 0}).Reason; got != ReasonNoCandidates {
+		t.Errorf("floor 0: Reason = %q, want %q", got, ReasonNoCandidates)
+	}
+}
