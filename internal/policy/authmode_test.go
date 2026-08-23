@@ -78,8 +78,30 @@ func TestSignalsFromHeaderIsCaseInsensitive(t *testing.T) {
 	if s.XGoogAPIKey != "g" {
 		t.Errorf("XGoogAPIKey = %q", s.XGoogAPIKey)
 	}
+	if s.XClient != "  MyTool  " {
+		t.Errorf("XClient = %q", s.XClient)
+	}
 	if ClassifyHeader(h) != Subscription {
 		t.Errorf("ClassifyHeader = %v, want Subscription", ClassifyHeader(h))
+	}
+	// The X-Client override must survive the header hop, not just the
+	// Signals hop: ClassifyClient reads X-Client and beats the claude-cli UA.
+	if got, ok := ClassifyClient(h); got != "mytool" || !ok {
+		t.Errorf("ClassifyClient = (%q,%v), want (\"mytool\",true)", got, ok)
+	}
+}
+
+// ClassifyHeader and ClassifyClient must fall through to the UA when no
+// X-Client is present, rather than being stubbed or wired to a stray header.
+func TestClassifyClientFromHeaderUsesUserAgent(t *testing.T) {
+	h := http.Header{}
+	h.Set("User-Agent", "codex-cli/0.5")
+
+	if got, ok := ClassifyClient(h); got != "codex" || !ok {
+		t.Errorf("ClassifyClient = (%q,%v), want (\"codex\",true)", got, ok)
+	}
+	if got, ok := ClassifyClient(http.Header{}); got != "" || ok {
+		t.Errorf("ClassifyClient(empty) = (%q,%v), want (\"\",false)", got, ok)
 	}
 }
 
