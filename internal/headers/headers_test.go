@@ -175,3 +175,76 @@ func TestBuildForwardRequestDoesNotAliasSource(t *testing.T) {
 		t.Error("BuildForwardRequest mutated its input")
 	}
 }
+
+// A name that merely starts with a hop-by-hop name is a distinct header.
+// Upgrade-Insecure-Requests is a real browser header, not an Upgrade.
+func TestDropListsMatchWholeNamesOnly(t *testing.T) {
+	for _, n := range []string{"Upgrade-Insecure-Requests", "Team-Id", "Connection-Id"} {
+		if IsHopByHop(n) {
+			t.Errorf("IsHopByHop(%q) = true, want false", n)
+		}
+	}
+	for _, n := range []string{"Hostname", "Content-Length-Hint"} {
+		if IsRequestDrop(n) {
+			t.Errorf("IsRequestDrop(%q) = true, want false", n)
+		}
+	}
+}
+
+// The prefix must anchor: an embedded x-headroom- is somebody else's header.
+func TestIsInternalRequiresPrefixNotSubstring(t *testing.T) {
+	if IsInternal("X-Foo-x-headroom-bar") {
+		t.Error("IsInternal matched an embedded prefix; it must anchor at the start")
+	}
+}
+
+// Connection may arrive as repeated header lines; every line counts.
+func TestConnectionListedAcrossRepeatedLines(t *testing.T) {
+	h := http.Header{}
+	h.Add("Connection", "keep-alive")
+	h.Add("Connection", "X-Second-Hop")
+
+	got := ConnectionListed(h)
+	if len(got) != 2 || got[0] != "keep-alive" || got[1] != "x-second-hop" {
+		t.Fatalf("ConnectionListed = %v, want [keep-alive x-second-hop]", got)
+	}
+
+	src := http.Header{}
+	src.Add("Connection", "keep-alive")
+	src.Add("Connection", "X-Second-Hop")
+	src.Set("X-Second-Hop", "secret")
+	if BuildForwardRequest(src).Get("X-Second-Hop") != "" {
+		t.Error("a header listed on a second Connection line was forwarded")
+	}
+}
+
+// Upstream may declare its own hop-by-hop headers in Connection; those are
+// for this hop only and must not reach the client.
+func TestFilterResponseDropsConnectionListed(t *testing.T) {
+	src := http.Header{}
+	src.Set("Connection", "X-Upstream-Hop")
+	src.Set("X-Upstream-Hop", "internal")
+	src.Set("Content-Type", "text/event-stream")
+
+	out := FilterResponse(src)
+	if out.Get("X-Upstream-Hop") != "" {
+		t.Error("a Connection-listed response header was copied to the client")
+	}
+	if out.Get("Content-Type") != "text/event-stream" {
+		t.Error("Content-Type must be kept")
+	}
+}
+
+// The copy must be deep: writing through a returned value slot must not
+// reach back into the caller's header map.
+func TestBuildForwardRequestDoesNotAliasValueSlices(t *testing.T) {
+	src := http.Header{}
+	src.Add("X-Multi", "a")
+	src.Add("X-Multi", "b")
+
+	out := BuildForwardRequest(src)
+	out.Values("X-Multi")[0] = "clobbered"
+	if got := src.Values("X-Multi")[0]; got != "a" {
+		t.Errorf("src X-Multi[0] = %q, want %q; value slice was aliased", got, "a")
+	}
+}
