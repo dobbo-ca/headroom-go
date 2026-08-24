@@ -97,8 +97,3 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
-// handleForward is filled in by Task 4.
-func (s *Server) handleForward(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "forwarding not implemented", http.StatusNotImplemented)
-}

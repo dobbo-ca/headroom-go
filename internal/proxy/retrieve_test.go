@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/router"
@@ -30,7 +31,7 @@ func testServer(t *testing.T, store ccr.Store, upstream string) *Server {
 		store = newMapStore()
 	}
 	return New(Deps{
-		Config:    Config{Upstream: upstream, MaxBodyBytes: 1 << 20, Compress: true},
+		Config:    Config{Upstream: upstream, MaxBodyBytes: 1 << 20, Compress: true, RequestTimeout: 5 * time.Second},
 		Store:     store,
 		Router:    router.NewDefault(),
 		Tokenizer: tokenizer.GetTokenizer("claude"),
