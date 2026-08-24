@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // compressibleLog is a repetitive log body the log compressor reliably shrinks.
@@ -273,9 +275,14 @@ func TestForwardSetsContentLengthAfterCompression(t *testing.T) {
 	req.Header.Set("X-Api-Key", "sk-ant-api03-x")
 	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
 
-	if got.header.Get("Content-Length") != "" && got.header.Get("Content-Length") != itoa(len(got.body)) {
-		t.Errorf("Content-Length = %q but body is %d bytes",
-			got.header.Get("Content-Length"), len(got.body))
+	if len(got.body) >= len(body) {
+		t.Fatalf("compression did not run: upstream got %d bytes of a %d-byte body", len(got.body), len(body))
+	}
+	// The header must be present: sending the body chunked instead loses the
+	// declared length the upstream expects.
+	if want := itoa(len(got.body)); got.header.Get("Content-Length") != want {
+		t.Errorf("Content-Length = %q, want %q (the compressed length)",
+			got.header.Get("Content-Length"), want)
 	}
 }
 
@@ -289,4 +296,65 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// The proxy describes its own work back to the client. These headers never
+// cross the upstream boundary, so they are only ever on the response.
+func TestForwardReportsTelemetryHeaders(t *testing.T) {
+	var got captured
+	up := upstreamCapturing(t, &got, func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{}`)) })
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	original := messagesBody(t, compressibleLog())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(original))
+	req.Header.Set("X-Api-Key", "sk-ant-api03-x")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if want := itoa(len(original) - len(got.body)); rec.Header().Get("X-Headroom-Bytes-Saved") != want {
+		t.Errorf("X-Headroom-Bytes-Saved = %q, want %q",
+			rec.Header().Get("X-Headroom-Bytes-Saved"), want)
+	}
+	before, err := strconv.Atoi(rec.Header().Get("X-Headroom-Tokens-Before"))
+	if err != nil {
+		t.Fatalf("X-Headroom-Tokens-Before = %q: %v", rec.Header().Get("X-Headroom-Tokens-Before"), err)
+	}
+	after, err := strconv.Atoi(rec.Header().Get("X-Headroom-Tokens-After"))
+	if err != nil {
+		t.Fatalf("X-Headroom-Tokens-After = %q: %v", rec.Header().Get("X-Headroom-Tokens-After"), err)
+	}
+	if after >= before {
+		t.Errorf("tokens after = %d, want fewer than the %d before", after, before)
+	}
+}
+
+// A request that never gets a response must not hang forever: the per-request
+// context deadline is the only timeout on this path.
+func TestForwardAppliesRequestTimeout(t *testing.T) {
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer up.Close()
+	defer close(release)
+
+	srv := testServer(t, nil, up.URL)
+	srv.deps.Config.RequestTimeout = 50 * time.Millisecond
+
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}")))
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502 after the request deadline", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request outlived its RequestTimeout")
+	}
 }
