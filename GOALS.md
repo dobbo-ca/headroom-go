@@ -21,6 +21,13 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
       (HEADROOM_* schema, flag>env>default), internal/mcp (stdio server with
       headroom_compress / headroom_retrieve / headroom_stats), and the
       cmd/headroom cobra CLI. v0.1 spec items 10 and 11 are complete.
+- [x] (Plan 5) v0.2 invariant core: internal/policy (AuthMode classify + 3-row
+      CompressionPolicy table), internal/cachecontrol (ComputeFrozenCount +
+      TTL-order warn), internal/livezone (Anthropic live-zone dispatcher:
+      frozen floor, block planning, byte-range surgery via gjson offsets,
+      I5 token reject, CCR markers). v0.2 spec items 1 and 2 are complete.
+      Deferred: the proxy server itself (item 3), POST /v1/retrieve, sjson
+      (lands with cachestab E3/E4), OpenAI dispatchers.
 
 ## Follow-ups
 
