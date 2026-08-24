@@ -30,15 +30,12 @@ func applyReplacements(orig []byte, reps []replacement) ([]byte, []Range) {
 	copy(sorted, reps)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
 
-	// Sized from the additions only: a malformed rep (end past the body, or
-	// end before start) would make a removed-bytes total nonsense, and a
-	// negative capacity panics before the per-rep guard below can drop it.
-	added := 0
-	for _, r := range sorted {
-		added += len(r.repl)
-	}
-	out := make([]byte, 0, len(orig)+added)
-	ranges := make([]Range, 0, len(sorted))
+	// No capacity hint: the exact output length is not known until the
+	// per-rep guard below has dropped malformed reps, and len(orig)+added
+	// over-allocates whenever a replacement shrinks its range — measurably
+	// slower than plain append at 64KB and 1MB bodies.
+	var out []byte
+	var ranges []Range
 
 	cursor := 0
 	for _, r := range sorted {
@@ -68,11 +65,7 @@ func encodeJSONString(s string) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(s); err != nil {
-		// json cannot fail to encode a Go string; fall back to the
-		// escaping form rather than returning invalid JSON.
-		b, _ := json.Marshal(s)
-		return b
-	}
+	// Encoding a Go string into an in-memory buffer cannot fail.
+	_ = enc.Encode(s)
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }

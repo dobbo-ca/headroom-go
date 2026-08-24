@@ -2,6 +2,7 @@ package livezone
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/tidwall/gjson"
 )
@@ -35,12 +36,7 @@ type planSlot struct {
 
 // isHotZone reports whether a block type is cache-hot.
 func isHotZone(blockType string) bool {
-	for _, t := range HotZoneBlockTypes {
-		if t == blockType {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(HotZoneBlockTypes, blockType)
 }
 
 // findLatestUserMessage returns the index of the highest-numbered message
