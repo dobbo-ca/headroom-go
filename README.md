@@ -9,7 +9,20 @@ Status: v0.1 in progress (compression engine + MCP server). See
 
 ## Install
 
-    go install github.com/dobbo-ca/headroom-go/cmd/headroom@latest
+```bash
+brew install dobbo-ca/taps/headroom-go
+```
+
+Or download a binary from [Releases](https://github.com/dobbo-ca/headroom-go/releases)
+— darwin, linux, and windows, amd64 and arm64. Or build from source:
+
+```bash
+go install github.com/dobbo-ca/headroom-go/cmd/headroom@latest
+```
+
+Releases are cut by pushing a `v*` tag. Every binary is built with
+`CGO_ENABLED=0` and stamped only with its version, so a rebuild from the same
+tag produces the same bytes.
 
 ## Semantic cache (opt-in, off by default)
 
@@ -49,14 +62,13 @@ as it does with the cache disabled.
 ## MCP server
 
 ```bash
-go build -o headroom ./cmd/headroom
-./headroom mcp serve
+headroom mcp serve
 ```
 
 Register it with an MCP client, for example Claude Code:
 
 ```bash
-claude mcp add headroom -- /path/to/headroom mcp serve
+claude mcp add headroom -- headroom mcp serve
 ```
 
 Three tools are exposed over stdio:
@@ -84,6 +96,12 @@ Precedence is flag, then environment variable, then default.
 | — | `HEADROOM_CCR_TTL_SECONDS` | `3600` | CCR entry lifetime |
 | — | `HEADROOM_CCR_CAPACITY` | `1000` | In-memory FIFO cap; SQLite ignores it |
 | — | `HEADROOM_HOME` | `~/.headroom` | Base directory for all of the above |
+
+## Claude skill
+
+`skills/headroom/SKILL.md` teaches an agent when to route large tool output
+through `headroom_compress` instead of reading it raw. Copy it into your
+project's `.claude/skills/` or point your plugin at it.
 
 ## License
 
