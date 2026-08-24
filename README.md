@@ -46,6 +46,42 @@ pick. Three rules follow, and the code enforces all three:
 If Ollama is not running, every lookup misses and the gateway behaves exactly
 as it does with the cache disabled.
 
+## Use it as a proxy
+
+`headroom proxy` sits in front of an upstream LLM API. It compresses REQUEST
+bodies through the live-zone dispatcher before forwarding them; responses
+always stream back verbatim — a response is never compressed or rewritten,
+because rewriting one corrupts live token rendering.
+
+```bash
+export HEADROOM_PROXY_UPSTREAM=https://api.anthropic.com
+headroom proxy
+```
+
+| Flag | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `--upstream` | `HEADROOM_PROXY_UPSTREAM` | — (required) | Upstream API base URL |
+| `--listen` | `HEADROOM_PROXY_LISTEN` | `0.0.0.0:8787` | Address the proxy listens on |
+| — | `HEADROOM_PROXY_MAX_BODY_BYTES` | `33554432` (32 MiB) | Request body cap; `0` means uncapped |
+| — | `HEADROOM_PROXY_TIMEOUT_SECONDS` | `600` | Per-request context deadline (there is no client-wide timeout, so long SSE streams are never cut) |
+| — | `HEADROOM_PROXY_COMPRESS` | on | Set to `disabled`, `off`, `false`, `0`, or `no` to forward request bodies unmodified |
+
+`GET /healthz` reports the proxy itself; `GET /healthz/upstream` checks the
+configured upstream. `POST /v1/retrieve` is headroom's own route — it is
+served locally and never forwarded upstream — and resolves a `<<ccr:HASH>>`
+marker back to the original bytes it replaced.
+
+### `headroom wrap`
+
+`headroom wrap claude` (or `headroom wrap codex`) starts the proxy if one
+is not already running, points the agent's base URL at it, and execs the
+agent CLI:
+
+```bash
+headroom wrap claude
+headroom wrap codex --upstream https://api.openai.com
+```
+
 ## MCP server
 
 ```bash
