@@ -135,3 +135,48 @@ func TestRejectsNegativeAndUnparseableNumbers(t *testing.T) {
 		})
 	}
 }
+
+// Every HEADROOM_PROXY_* variable must actually reach the Config; the other
+// tests only ever exercise defaults, rejections, and the flag override.
+func TestEnvValuesAreUsed(t *testing.T) {
+	t.Setenv("HEADROOM_PROXY_UPSTREAM", "https://api.anthropic.com")
+	t.Setenv("HEADROOM_PROXY_LISTEN", "127.0.0.1:9999")
+	t.Setenv("HEADROOM_PROXY_MAX_BODY_BYTES", "1024")
+	t.Setenv("HEADROOM_PROXY_TIMEOUT_SECONDS", "5")
+
+	c, err := Load(Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != "127.0.0.1:9999" {
+		t.Errorf("Listen = %q, want the env value", c.Listen)
+	}
+	if c.MaxBodyBytes != 1024 {
+		t.Errorf("MaxBodyBytes = %d, want the env value 1024", c.MaxBodyBytes)
+	}
+	if c.RequestTimeout != 5*time.Second {
+		t.Errorf("RequestTimeout = %v, want the env value 5s", c.RequestTimeout)
+	}
+}
+
+// A --upstream flag takes the same validation and normalisation as the
+// environment variable; it must not be a way around the scheme check.
+func TestFlagUpstreamIsValidatedAndTrimmed(t *testing.T) {
+	t.Setenv("HEADROOM_PROXY_UPSTREAM", "https://env.example")
+
+	for _, bad := range []string{"ftp://x.example", "not a url", "https://", "/relative"} {
+		t.Run("rejects:"+bad, func(t *testing.T) {
+			if _, err := Load(Overrides{Upstream: bad}); err == nil {
+				t.Errorf("Load accepted --upstream %q", bad)
+			}
+		})
+	}
+
+	c, err := Load(Overrides{Upstream: "https://flag.example///"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream != "https://flag.example" {
+		t.Errorf("Upstream = %q, want no trailing slash", c.Upstream)
+	}
+}
