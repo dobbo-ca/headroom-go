@@ -209,6 +209,45 @@ func TestDispatchStoresOriginalUnderTheEmittedMarker(t *testing.T) {
 	}
 }
 
+// Dispatch's reported accounting is the caller's only view of what the I5
+// gate decided, so it is pinned end to end: the per-block outcome carries the
+// block's own counts and the key the marker in the body was built from, and
+// the Result totals are their sum, in the right direction.
+func TestDispatchReportsTokenAccounting(t *testing.T) {
+	text := repetitiveJSONBlock()
+	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
+	body := userBodyWithText(t, text)
+
+	res := Dispatch(body, Options{
+		Router: router.NewDefault(), Store: newMapStore(), Tokenizer: tok, FrozenCount: 0})
+	if !res.Applied {
+		t.Fatalf("Dispatch did not rewrite: %q", res.Reason)
+	}
+	if len(res.Blocks) != 1 {
+		t.Fatalf("got %d block outcomes, want 1: %+v", len(res.Blocks), res.Blocks)
+	}
+	b := res.Blocks[0]
+	if b.Action != "compressed" {
+		t.Errorf("Action = %q, want compressed", b.Action)
+	}
+	if b.CacheKey != markerHashIn(t, string(res.Body)) {
+		t.Errorf("CacheKey = %q, want the hash of the marker in the body %q",
+			b.CacheKey, markerHashIn(t, string(res.Body)))
+	}
+	if b.TokensBefore != tok.CountText(text) {
+		t.Errorf("block TokensBefore = %d, want the original's count %d",
+			b.TokensBefore, tok.CountText(text))
+	}
+	if b.TokensAfter <= 0 || b.TokensAfter >= b.TokensBefore {
+		t.Errorf("block TokensAfter = %d, want a positive count below %d",
+			b.TokensAfter, b.TokensBefore)
+	}
+	if res.TokensBefore != b.TokensBefore || res.TokensAfter != b.TokensAfter {
+		t.Errorf("Result totals = %d->%d, want the block's %d->%d",
+			res.TokensBefore, res.TokensAfter, b.TokensBefore, b.TokensAfter)
+	}
+}
+
 // A block rejected by the I5 gate leaves no orphan store entry: nothing may
 // be written before the gate accepts.
 func TestDispatchRejectedBlockLeavesNoOrphanEntry(t *testing.T) {
