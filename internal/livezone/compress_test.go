@@ -1,10 +1,12 @@
 package livezone
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
+	"github.com/dobbo-ca/headroom-go/internal/router"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 )
 
@@ -114,4 +116,126 @@ func TestCompressBlockNoOpWhenOutputEqualsInput(t *testing.T) {
 	if res.action == "compressed" {
 		t.Errorf("action = %q, want a non-compressed action", res.action)
 	}
+}
+
+// repetitiveJSONBlock is a JSON array the default router reliably shrinks,
+// and is well above BlockByteThreshold.
+func repetitiveJSONBlock() string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := 0; i < 100; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(`{"id": 1, "name": "alpha beta", "status": "ok", "latency": 12}`)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// flatCounter reports the same token count for every string, so the I5 gate
+// sees tokensAfter == tokensBefore and must reject.
+type flatCounter struct{}
+
+func (flatCounter) CountText(string) int       { return 100 }
+func (flatCounter) Backend() tokenizer.Backend { return tokenizer.BackendEstimation }
+
+// An accepted block's replacement carries the marker, and the token count the
+// gate used is the count of that exact replacement — i.e. the marker was
+// injected BEFORE the gate and cannot escape the accounting.
+func TestCompressBlockMarkerIsInsideTheGatedText(t *testing.T) {
+	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
+	store := newMapStore()
+	text := repetitiveJSONBlock()
+
+	res := compressBlock(text, Options{Router: router.NewDefault(), Store: store}, tok)
+	if !res.accepted {
+		t.Fatalf("router failed to shrink a repetitive JSON array: %+v", res)
+	}
+	if res.cacheKey != ccr.ComputeKey([]byte(text)) {
+		t.Errorf("cacheKey = %q, want the key of the ORIGINAL text", res.cacheKey)
+	}
+	if !strings.HasSuffix(res.replacement, ccr.MarkerFor(res.cacheKey)) {
+		t.Errorf("replacement must end with the CCR marker (I6): %q", res.replacement)
+	}
+	if got := tok.CountText(res.replacement); got != res.tokensAfter {
+		t.Errorf("tokensAfter = %d but the replacement counts %d: the marker escaped the I5 gate",
+			res.tokensAfter, got)
+	}
+	if res.tokensBefore != tok.CountText(text) {
+		t.Errorf("tokensBefore = %d, want the count of the original text %d",
+			res.tokensBefore, tok.CountText(text))
+	}
+	// Scoped to the live-zone key: a compressor in the pipeline may keep its
+	// own CCR entry under its own key, which is not this package's business.
+	if _, ok := store.Get(res.cacheKey); ok {
+		t.Error("compressBlock stored the original; only Dispatch may store, after the gate")
+	}
+}
+
+// Every marker Dispatch emits resolves: the store holds the original under
+// exactly the hash written into the body.
+func TestDispatchStoresOriginalUnderTheEmittedMarker(t *testing.T) {
+	text := repetitiveJSONBlock()
+	store := newMapStore()
+	body := userBodyWithText(t, text)
+
+	res := Dispatch(body, Options{Router: router.NewDefault(), Store: store, FrozenCount: 0})
+	if !res.Applied {
+		t.Fatalf("Dispatch did not rewrite: %+v", res.Reason)
+	}
+
+	hash := markerHashIn(t, string(res.Body))
+	got, ok := store.Get(hash)
+	if !ok {
+		t.Fatalf("marker %q in the body has no store entry: it cannot be resolved", hash)
+	}
+	if got != text {
+		t.Errorf("store payload does not round-trip to the original block text")
+	}
+}
+
+// A block rejected by the I5 gate leaves no orphan store entry: nothing may
+// be written before the gate accepts.
+func TestDispatchRejectedBlockLeavesNoOrphanEntry(t *testing.T) {
+	store := newMapStore()
+	body := userBodyWithText(t, repetitiveJSONBlock())
+
+	res := Dispatch(body, Options{
+		Router: router.NewDefault(), Store: store, Tokenizer: flatCounter{}, FrozenCount: 0})
+	if res.Applied {
+		t.Fatalf("equal token counts must be rejected by I5")
+	}
+	if res.Reason != ReasonAllRejected {
+		t.Errorf("Reason = %q, want %q", res.Reason, ReasonAllRejected)
+	}
+	if _, ok := store.Get(ccr.ComputeKey([]byte(repetitiveJSONBlock()))); ok {
+		t.Error("a rejected block left its original in the store; it must be stored only after the gate accepts")
+	}
+}
+
+// userBodyWithText embeds text as the latest user message's single text block.
+func userBodyWithText(t *testing.T, text string) []byte {
+	t.Helper()
+	quoted, err := json.Marshal(text)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return []byte(`{"model":"claude-3-5-sonnet-20241022","system":"you are helpful",` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":` + string(quoted) + `}]}]}`)
+}
+
+// markerHashIn extracts the single <<ccr:HASH>> hash present in s.
+func markerHashIn(t *testing.T, s string) string {
+	t.Helper()
+	i := strings.Index(s, "<<ccr:")
+	if i < 0 {
+		t.Fatalf("no CCR marker in %q", s)
+	}
+	rest := s[i+len("<<ccr:"):]
+	j := strings.Index(rest, ">>")
+	if j < 0 {
+		t.Fatalf("unterminated CCR marker in %q", s)
+	}
+	return rest[:j]
 }
