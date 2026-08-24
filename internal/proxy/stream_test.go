@@ -9,35 +9,6 @@ import (
 	"time"
 )
 
-func TestIsStreaming(t *testing.T) {
-	tests := []struct {
-		ct   string
-		want bool
-	}{
-		{"text/event-stream", true},
-		{"text/event-stream; charset=utf-8", true},
-		{"TEXT/EVENT-STREAM", true},
-		{"application/json", false},
-		{"", false},
-		{"text/plain", false},
-		// A malformed parameter must not turn streaming off: buffering an
-		// SSE stream would stall live token rendering.
-		{"text/event-stream; charset", true},
-		{"application/json; charset", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.ct, func(t *testing.T) {
-			h := http.Header{}
-			if tt.ct != "" {
-				h.Set("Content-Type", tt.ct)
-			}
-			if got := isStreaming(h); got != tt.want {
-				t.Errorf("isStreaming(%q) = %v, want %v", tt.ct, got, tt.want)
-			}
-		})
-	}
-}
-
 // flushRecorder counts Flush calls and records the bytes visible at each one.
 type flushRecorder struct {
 	*httptest.ResponseRecorder
@@ -142,6 +113,34 @@ func TestNonStreamingResponseIsCopiedVerbatim(t *testing.T) {
 	}
 }
 
+// A malformed Content-Type parameter must not turn streaming off: buffering
+// an SSE stream would stall live token rendering. The upstream's response has
+// no declared length, which is what keeps the flushing on.
+func TestMalformedSSEContentTypeStillStreams(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		for _, ev := range []string{"data: one\n\n", "data: two\n\n", "data: three\n\n"} {
+			_, _ = w.Write([]byte(ev))
+			fl.Flush()
+			time.Sleep(15 * time.Millisecond)
+		}
+	}))
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	rec := newFlushRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}")))
+
+	if rec.flushes < 2 {
+		t.Errorf("Flush called %d times; a malformed SSE content-type must not buffer the stream", rec.flushes)
+	}
+	if len(rec.snapshots) >= 2 && rec.snapshots[0] == rec.snapshots[len(rec.snapshots)-1] {
+		t.Error("every flush saw the same bytes; the response was buffered")
+	}
+}
+
 // failWriter fails every Write, standing in for a client that hung up.
 type failWriter struct{ header http.Header }
 
@@ -161,32 +160,41 @@ type endlessReader struct{ reads int }
 func (e *endlessReader) Read(p []byte) (int, error) {
 	e.reads++
 	if e.reads > 1000 {
-		return 0, errors.New("runaway: copyResponse kept reading after a write error")
+		return 0, errors.New("runaway: the proxy kept reading after a write error")
 	}
 	p[0] = 'x'
 	return 1, nil
 }
 func (e *endlessReader) Close() error { return nil }
 
-// When the client goes away mid-stream, copyResponse must stop; otherwise it
+// stubTransport hands back one canned response, so the stream under test is
+// entirely in this test's control.
+type stubTransport struct{ resp *http.Response }
+
+func (s stubTransport) RoundTrip(*http.Request) (*http.Response, error) { return s.resp, nil }
+
+// When the client goes away mid-stream, the proxy must stop; otherwise it
 // drains the whole upstream stream into a dead socket.
 func TestStreamingStopsWhenClientWriteFails(t *testing.T) {
 	srv := testServer(t, nil, "https://upstream.invalid")
 	body := &endlessReader{}
-	resp := &http.Response{
-		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:   body,
-	}
+	srv.fwd.Transport = stubTransport{resp: &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:          body,
+		ContentLength: -1,
+	}}
 
 	done := make(chan struct{})
 	go func() {
-		srv.copyResponse(&failWriter{}, resp)
+		srv.Handler().ServeHTTP(&failWriter{},
+			httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}")))
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("copyResponse did not return after the client write failed")
+		t.Fatal("the proxy did not return after the client write failed")
 	}
 	if body.reads != 1 {
 		t.Errorf("upstream was read %d times; must stop at the first failed write", body.reads)

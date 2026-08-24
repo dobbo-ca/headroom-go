@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dobbo-ca/headroom-go/internal/headers"
 	"github.com/dobbo-ca/headroom-go/internal/livezone"
 	"github.com/dobbo-ca/headroom-go/internal/policy"
 )
@@ -19,7 +18,12 @@ import (
 // unchanged.
 const anthropicMessagesPath = "/v1/messages"
 
+// internalHeaderPrefix marks headroom's own headers.
+const internalHeaderPrefix = "x-headroom-"
+
 // handleForward is the single funnel every non-headroom route goes through.
+// It only chooses the REQUEST body and reports what it did; the hop itself is
+// s.fwd. The RESPONSE is never compressed or rewritten (spec 9 risk 4).
 func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	body, err := s.readBody(w, r)
 	if err != nil {
@@ -28,44 +32,22 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sent, result := s.maybeCompress(r, body)
-
-	upstreamURL := s.deps.Config.Upstream + r.URL.RequestURI()
-	ctx, cancel := context.WithTimeout(r.Context(), s.deps.Config.RequestTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, bytes.NewReader(sent))
-	if err != nil {
-		http.Error(w, "headroom: build upstream request: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	req.Header = headers.BuildForwardRequest(r.Header)
-	headers.AppendXFF(req.Header, r.RemoteAddr)
-	req.ContentLength = int64(len(sent))
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		slog.Warn("upstream request failed", "path", r.URL.Path, "error", err)
-		http.Error(w, "headroom: upstream request failed: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	dst := w.Header()
-	for name, values := range headers.FilterResponse(resp.Header) {
-		dst[name] = values
-	}
 	if result != nil && result.Applied {
 		// Describe our own work to the client. This direction never crosses
 		// an upstream boundary.
+		dst := w.Header()
 		dst.Set("X-Headroom-Tokens-Before", strconv.Itoa(result.TokensBefore))
 		dst.Set("X-Headroom-Tokens-After", strconv.Itoa(result.TokensAfter))
 		dst.Set("X-Headroom-Bytes-Saved", strconv.Itoa(len(body)-len(sent)))
 	}
-	w.WriteHeader(resp.StatusCode)
 
-	// The RESPONSE is never compressed (spec 9 risk 4): rewriting it would
-	// corrupt live token rendering. Copy it through untouched.
-	s.copyResponse(w, resp)
+	ctx, cancel := context.WithTimeout(r.Context(), s.deps.Config.RequestTimeout)
+	defer cancel()
+
+	r = r.WithContext(ctx)
+	r.Body = io.NopCloser(bytes.NewReader(sent))
+	r.ContentLength = int64(len(sent))
+	s.fwd.ServeHTTP(w, r)
 }
 
 // readBody buffers the request body, enforcing the size cap. On an oversize

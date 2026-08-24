@@ -36,6 +36,7 @@ type captured struct {
 	path   string
 	method string
 	body   string
+	host   string
 	header http.Header
 }
 
@@ -43,7 +44,8 @@ func upstreamCapturing(t *testing.T, got *captured, reply func(http.ResponseWrit
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		got.path, got.method, got.body, got.header = r.URL.RequestURI(), r.Method, string(b), r.Header.Clone()
+		got.path, got.method, got.body = r.URL.RequestURI(), r.Method, string(b)
+		got.host, got.header = r.Host, r.Header.Clone()
 		reply(w)
 	}))
 }
@@ -280,22 +282,10 @@ func TestForwardSetsContentLengthAfterCompression(t *testing.T) {
 	}
 	// The header must be present: sending the body chunked instead loses the
 	// declared length the upstream expects.
-	if want := itoa(len(got.body)); got.header.Get("Content-Length") != want {
+	if want := strconv.Itoa(len(got.body)); got.header.Get("Content-Length") != want {
 		t.Errorf("Content-Length = %q, want %q (the compressed length)",
 			got.header.Get("Content-Length"), want)
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 // The proxy describes its own work back to the client. These headers never
@@ -312,7 +302,7 @@ func TestForwardReportsTelemetryHeaders(t *testing.T) {
 	req.Header.Set("X-Api-Key", "sk-ant-api03-x")
 	srv.Handler().ServeHTTP(rec, req)
 
-	if want := itoa(len(original) - len(got.body)); rec.Header().Get("X-Headroom-Bytes-Saved") != want {
+	if want := strconv.Itoa(len(original) - len(got.body)); rec.Header().Get("X-Headroom-Bytes-Saved") != want {
 		t.Errorf("X-Headroom-Bytes-Saved = %q, want %q",
 			rec.Header().Get("X-Headroom-Bytes-Saved"), want)
 	}
@@ -356,5 +346,115 @@ func TestForwardAppliesRequestTimeout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request outlived its RequestTimeout")
+	}
+}
+
+// Hop-by-hop headers (RFC 7230 6.1) must not cross the proxy, including the
+// ones the client names inside Connection. Credentials must survive.
+func TestForwardDropsHopByHopRequestHeaders(t *testing.T) {
+	var got captured
+	up := upstreamCapturing(t, &got, func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{}`)) })
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("Connection", "X-Custom-Hop")
+	req.Header.Set("X-Custom-Hop", "secret")
+	req.Header.Set("Authorization", "Bearer sk-ant-api03-x")
+	// A name that merely starts with a hop-by-hop name is a distinct header;
+	// Upgrade-Insecure-Requests is a real browser header, not an Upgrade.
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+
+	if got.header.Get("X-Custom-Hop") != "" {
+		t.Error("a Connection-listed header was forwarded")
+	}
+	if got.header.Get("Connection") != "" {
+		t.Error("Connection itself was forwarded")
+	}
+	if got.header.Get("Authorization") != "Bearer sk-ant-api03-x" {
+		t.Error("Authorization was not forwarded")
+	}
+	if got.header.Get("Upgrade-Insecure-Requests") != "1" {
+		t.Error("Upgrade-Insecure-Requests was dropped; the hop-by-hop list must match whole names")
+	}
+}
+
+// The client's Host must not be copied through: the upstream has to see its
+// own host or TLS/routing breaks.
+func TestForwardSendsTheUpstreamHost(t *testing.T) {
+	var got captured
+	up := upstreamCapturing(t, &got, func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{}`)) })
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Host = "evil.example"
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+
+	if got.host == "evil.example" {
+		t.Error("the client's Host was forwarded upstream")
+	}
+	if want := strings.TrimPrefix(up.URL, "http://"); got.host != want {
+		t.Errorf("upstream Host = %q, want %q", got.host, want)
+	}
+}
+
+// Multi-valued headers must survive intact; a naive Get/Set copy loses values.
+func TestForwardPreservesMultiValuedHeaders(t *testing.T) {
+	var got captured
+	up := upstreamCapturing(t, &got, func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{}`)) })
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Add("X-Multi", "a")
+	req.Header.Add("X-Multi", "b")
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+
+	if v := got.header.Values("X-Multi"); len(v) != 2 || v[0] != "a" || v[1] != "b" {
+		t.Errorf("X-Multi = %v, want [a b]", v)
+	}
+}
+
+// A forwarding chain the client already started must be kept, with our
+// client's IP appended.
+func TestForwardAppendsToAnExistingForwardedForChain(t *testing.T) {
+	var got captured
+	up := upstreamCapturing(t, &got, func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{}`)) })
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+	req.RemoteAddr = "203.0.113.9:5555"
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+
+	if want := "198.51.100.1, 203.0.113.9"; got.header.Get("X-Forwarded-For") != want {
+		t.Errorf("X-Forwarded-For = %q, want %q", got.header.Get("X-Forwarded-For"), want)
+	}
+}
+
+// The upstream may declare its own hop-by-hop headers in Connection; those
+// are for this hop only and must not reach the client. Content-Length must be
+// kept so the client sees the real body length.
+func TestForwardDropsHopByHopResponseHeaders(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Connection", "X-Upstream-Hop")
+		w.Header().Set("X-Upstream-Hop", "internal")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+
+	srv := testServer(t, nil, up.URL)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}")))
+
+	if rec.Header().Get("X-Upstream-Hop") != "" {
+		t.Error("a Connection-listed response header was copied to the client")
+	}
+	if rec.Header().Get("Content-Length") != strconv.Itoa(len(`{"ok":true}`)) {
+		t.Errorf("Content-Length = %q, want the real body length", rec.Header().Get("Content-Length"))
 	}
 }

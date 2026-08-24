@@ -71,10 +71,9 @@ func newWrapCmd() *cobra.Command {
 		Long: "Starts the headroom proxy if it is not already running, points the\n" +
 			"agent's base URL at it, and launches the agent.\n\nSupported agents: " +
 			supportedAgents(),
-		Args:               cobra.MinimumNArgs(1),
-		DisableFlagParsing: false,
-		SilenceUsage:       true,
-		SilenceErrors:      true,
+		Args:          cobra.MinimumNArgs(1),
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, ok := agentSpecFor(args[0])
 			if !ok {
