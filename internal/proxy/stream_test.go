@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,10 @@ func TestIsStreaming(t *testing.T) {
 		{"application/json", false},
 		{"", false},
 		{"text/plain", false},
+		// A malformed parameter must not turn streaming off: buffering an
+		// SSE stream would stall live token rendering.
+		{"text/event-stream; charset", true},
+		{"application/json; charset", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ct, func(t *testing.T) {
@@ -134,5 +139,56 @@ func TestNonStreamingResponseIsCopiedVerbatim(t *testing.T) {
 
 	if rec.Body.String() != payload {
 		t.Error("a non-streaming response body was altered")
+	}
+}
+
+// failWriter fails every Write, standing in for a client that hung up.
+type failWriter struct{ header http.Header }
+
+func (f *failWriter) Header() http.Header {
+	if f.header == nil {
+		f.header = http.Header{}
+	}
+	return f.header
+}
+func (f *failWriter) Write([]byte) (int, error) { return 0, errors.New("client gone") }
+func (f *failWriter) WriteHeader(int)           {}
+func (f *failWriter) Flush()                    {}
+
+// endlessReader never ends; it counts how many reads the proxy performed.
+type endlessReader struct{ reads int }
+
+func (e *endlessReader) Read(p []byte) (int, error) {
+	e.reads++
+	if e.reads > 1000 {
+		return 0, errors.New("runaway: copyResponse kept reading after a write error")
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+func (e *endlessReader) Close() error { return nil }
+
+// When the client goes away mid-stream, copyResponse must stop; otherwise it
+// drains the whole upstream stream into a dead socket.
+func TestStreamingStopsWhenClientWriteFails(t *testing.T) {
+	srv := testServer(t, nil, "https://upstream.invalid")
+	body := &endlessReader{}
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:   body,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.copyResponse(&failWriter{}, resp)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("copyResponse did not return after the client write failed")
+	}
+	if body.reads != 1 {
+		t.Errorf("upstream was read %d times; must stop at the first failed write", body.reads)
 	}
 }
