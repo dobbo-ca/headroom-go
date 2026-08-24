@@ -71,3 +71,39 @@ func TestDispatchDeterministicAcrossCorpus(t *testing.T) {
 		})
 	}
 }
+
+// I4 with more than one rewrite per body. A single-rewrite body cannot
+// observe iteration order at all, so this is the case that actually fails
+// when a map reaches the output path.
+func TestDispatchIsDeterministicWithMultipleBlocks(t *testing.T) {
+	in := bodyTwoBlocks()
+
+	first := Dispatch(in, liveOptions(t))
+	if !first.Applied || len(first.Rewritten) != 2 {
+		t.Fatalf("expected two rewrites, got applied=%v reason=%q ranges=%+v",
+			first.Applied, first.Reason, first.Rewritten)
+	}
+
+	for i := 0; i < 25; i++ {
+		got := Dispatch(in, liveOptions(t))
+		if !bytes.Equal(got.Body, first.Body) {
+			t.Fatalf("run %d produced different bytes", i)
+		}
+		if len(got.Rewritten) != len(first.Rewritten) {
+			t.Fatalf("run %d rewrote %d ranges, first rewrote %d", i, len(got.Rewritten), len(first.Rewritten))
+		}
+		for j := range got.Rewritten {
+			if got.Rewritten[j] != first.Rewritten[j] {
+				t.Fatalf("run %d range %d = %+v, first = %+v", i, j, got.Rewritten[j], first.Rewritten[j])
+			}
+		}
+		if len(got.Blocks) != len(first.Blocks) {
+			t.Fatalf("run %d reported %d blocks, first reported %d", i, len(got.Blocks), len(first.Blocks))
+		}
+		for j := range got.Blocks {
+			if got.Blocks[j] != first.Blocks[j] {
+				t.Fatalf("run %d Blocks[%d] = %+v, first = %+v", i, j, got.Blocks[j], first.Blocks[j])
+			}
+		}
+	}
+}

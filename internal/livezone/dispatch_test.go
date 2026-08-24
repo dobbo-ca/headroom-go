@@ -2,12 +2,14 @@ package livezone
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/policy"
 	"github.com/dobbo-ca/headroom-go/internal/router"
+	"github.com/tidwall/gjson"
 )
 
 // compressibleLog is a repetitive log body the log compressor reliably
@@ -266,5 +268,86 @@ func TestDispatchExplicitFrozenCountOverridesDerived(t *testing.T) {
 	}
 	if res.FrozenCount != 3 {
 		t.Errorf("FrozenCount = %d, want the explicit 3", res.FrozenCount)
+	}
+}
+
+// bodyTwoBlocks puts two independently compressible text blocks in the
+// latest user message, with a verbatim gap between them.
+func bodyTwoBlocks() []byte {
+	first, err := json.Marshal(compressibleLog())
+	if err != nil {
+		panic(err)
+	}
+	second, err := json.Marshal(compressibleLog() + "tail\n")
+	if err != nil {
+		panic(err)
+	}
+	return []byte(`{"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":` + string(first) + `},` +
+		`{"type":"text","text":"gap"},` +
+		`{"type":"text","text":` + string(second) + `}` +
+		`]}]}`)
+}
+
+// With more than one rewrite in a single body the ORDER of the reported
+// ranges and outcomes becomes observable. Both must be ascending and
+// non-overlapping: anything that reaches the output path through a map
+// (or drops the splice sort) shows up here and nowhere else, because every
+// other end-to-end body rewrites at most one block.
+func TestDispatchMultipleBlocksAreOrderedAndSpliced(t *testing.T) {
+	in := bodyTwoBlocks()
+	opts := liveOptions(t)
+	res := Dispatch(in, opts)
+
+	if !res.Applied {
+		t.Fatalf("expected compression, got %q", res.Reason)
+	}
+	if len(res.Rewritten) != 2 {
+		t.Fatalf("rewrote %d ranges, want 2: %+v", len(res.Rewritten), res.Rewritten)
+	}
+	if res.Rewritten[0].Start >= res.Rewritten[1].Start {
+		t.Errorf("ranges are not ascending: %+v", res.Rewritten)
+	}
+	if res.Rewritten[0].End > res.Rewritten[1].Start {
+		t.Errorf("ranges overlap: %+v", res.Rewritten)
+	}
+
+	// Blocks carry every content block, in content order.
+	wantIdx := []int{0, 1, 2}
+	wantAct := []string{"compressed", "below_threshold", "compressed"}
+	if len(res.Blocks) != len(wantIdx) {
+		t.Fatalf("Blocks = %+v, want %d entries", res.Blocks, len(wantIdx))
+	}
+	for i, b := range res.Blocks {
+		if b.Index != wantIdx[i] || b.Action != wantAct[i] {
+			t.Errorf("Blocks[%d] = {Index:%d Action:%q}, want {Index:%d Action:%q}",
+				i, b.Index, b.Action, wantIdx[i], wantAct[i])
+		}
+	}
+
+	assertUntouchedRangesIdentical(t, in, res)
+
+	// The untouched gap block survives verbatim and the output still parses.
+	if !strings.Contains(string(res.Body), `{"type":"text","text":"gap"}`) {
+		t.Error("the gap block between the two rewrites was not copied verbatim")
+	}
+	var v map[string]any
+	if err := json.Unmarshal(res.Body, &v); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+
+	// Each block's marker resolves to that block's own original: two
+	// rewrites in one body must not share or cross their CCR keys.
+	for i, b := range res.Blocks {
+		if b.Action != "compressed" {
+			continue
+		}
+		got, ok := opts.Store.Get(b.CacheKey)
+		if !ok {
+			t.Fatalf("Blocks[%d]: key %q does not resolve", i, b.CacheKey)
+		}
+		if want := gjson.GetBytes(in, fmt.Sprintf("messages.0.content.%d.text", b.Index)).Str; got != want {
+			t.Errorf("Blocks[%d]: store holds the wrong original for key %q", i, b.CacheKey)
+		}
 	}
 }
