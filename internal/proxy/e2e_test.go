@@ -116,3 +116,148 @@ func markerHashIn(t *testing.T, s string) string {
 	}
 	return rest[:j]
 }
+
+// twoMessageBody builds a /v1/messages body whose FIRST user message carries a
+// cache_control marker — pinning it into Anthropic's cached prefix — and whose
+// second user message is live. Both texts are equally compressible, so the only
+// thing that can keep the first one intact is the frozen floor.
+func twoMessageBody(t *testing.T, frozenText, liveText string) string {
+	t.Helper()
+	frozen, err := json.Marshal(frozenText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := json.Marshal(liveText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `{"model":"claude-3-5-sonnet-20241022","system":"you are helpful","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":` + string(frozen) +
+		`,"cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":` + string(live) + `}]}]}`
+}
+
+// The proxy must honour the customer's cache_control frozen prefix: touching a
+// byte below the floor changes Anthropic's cache key and silently inflates the
+// bill. The live message must still be compressed, so this cannot pass by the
+// proxy simply doing nothing.
+func TestEndToEndFrozenPrefixIsNotTouched(t *testing.T) {
+	var upstreamBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		upstreamBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer up.Close()
+
+	srv := New(Deps{
+		Config:    Config{Upstream: up.URL, MaxBodyBytes: 32 << 20, Compress: true, RequestTimeout: 30e9, DialTimeout: 10e9},
+		Store:     newMapStore(),
+		Router:    router.NewDefault(),
+		Tokenizer: tokenizer.GetTokenizer("claude"),
+		Version:   "e2e",
+	})
+	front := httptest.NewServer(srv.Handler())
+	defer front.Close()
+
+	frozenText := compressibleLog()
+	liveText := strings.ReplaceAll(compressibleLog(), "worker", "runner")
+	original := twoMessageBody(t, frozenText, liveText)
+
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	// The live message was compressed: the request did get smaller, and the
+	// marker resolves to the LIVE text, not the frozen one.
+	if len(upstreamBody) >= len(original) {
+		t.Fatalf("upstream got %d bytes, client sent %d: no compression happened",
+			len(upstreamBody), len(original))
+	}
+	hash := markerHashIn(t, upstreamBody)
+	if hash != ccr.ComputeKey([]byte(liveText)) {
+		t.Errorf("the emitted marker keys %q; want the LIVE message %q",
+			hash, ccr.ComputeKey([]byte(liveText)))
+	}
+	if hash == ccr.ComputeKey([]byte(frozenText)) {
+		t.Fatal("the FROZEN message was offloaded to CCR")
+	}
+
+	// The frozen message survived byte-for-byte, marker and all.
+	encodedFrozen, err := json.Marshal(frozenText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(upstreamBody, string(encodedFrozen)) {
+		t.Error("the cache_control-frozen message was rewritten; the prompt cache key is broken")
+	}
+	if !strings.Contains(upstreamBody, `"cache_control":{"type":"ephemeral"}`) {
+		t.Error("the cache_control marker itself did not survive")
+	}
+	// Exactly one block was offloaded, so exactly one marker is present.
+	if n := strings.Count(upstreamBody, "<<ccr:"); n != 1 {
+		t.Errorf("found %d CCR markers upstream, want exactly 1 (the live message)", n)
+	}
+}
+
+// When the customer pins the WHOLE prompt with a cache_control marker on the
+// last message, there is no live zone: headroom must forward the request byte
+// for byte. Rewriting anything here changes Anthropic's cache key, drops the
+// hit rate to zero, and inflates the customer's bill.
+func TestEndToEndFullyCachedPromptIsForwardedVerbatim(t *testing.T) {
+	var upstreamBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		upstreamBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer up.Close()
+
+	store := newMapStore()
+	srv := New(Deps{
+		Config:    Config{Upstream: up.URL, MaxBodyBytes: 32 << 20, Compress: true, RequestTimeout: 30e9, DialTimeout: 10e9},
+		Store:     store,
+		Router:    router.NewDefault(),
+		Tokenizer: tokenizer.GetTokenizer("claude"),
+		Version:   "e2e",
+	})
+	front := httptest.NewServer(srv.Handler())
+	defer front.Close()
+
+	quoted, err := json.Marshal(compressibleLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both messages are cache-pinned, so the frozen floor covers every one.
+	original := `{"model":"claude-3-5-sonnet-20241022","system":"you are helpful","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":` + string(quoted) +
+		`,"cache_control":{"type":"ephemeral"}}]}]}`
+
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if upstreamBody != original {
+		t.Errorf("a fully cache-pinned body was rewritten: upstream got %d bytes, client sent %d",
+			len(upstreamBody), len(original))
+	}
+	if strings.Contains(upstreamBody, "<<ccr:") {
+		t.Error("a CCR marker was injected into a fully cache-pinned prompt")
+	}
+	if store.Len() != 0 {
+		t.Errorf("store holds %d entries; a fully cache-pinned prompt must offload nothing", store.Len())
+	}
+}
