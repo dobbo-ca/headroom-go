@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -26,11 +27,13 @@ func newRootCmd() *cobra.Command {
 	root.SetOut(os.Stderr)
 	root.SetErr(os.Stderr)
 	root.AddCommand(newMCPCmd())
+	root.AddCommand(newProxyCmd())
+	root.AddCommand(newWrapCmd())
 	return root
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	if err := newRootCmd().ExecuteContext(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "headroom:", err)
 		os.Exit(1)
 	}

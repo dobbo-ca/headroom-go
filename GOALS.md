@@ -28,6 +28,15 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
       I5 token reject, CCR markers). v0.2 spec items 1 and 2 are complete.
       Deferred: the proxy server itself (item 3), POST /v1/retrieve, sjson
       (lands with cachestab E3/E4), OpenAI dispatchers.
+- [x] (Plan 6) v0.2 proxy: internal/proxy (config, server, forward with
+      live-zone request compression, health, local POST /v1/retrieve),
+      cmd/headroom proxy and wrap (claude, codex). v0.2 spec items 3 and 5
+      are complete; headroom is usable as a drop-in proxy. Zero new
+      dependencies: stdlib ServeMux replaces chi, httputil.ReverseProxy is
+      the hop (hop-by-hop and Connection-listed header stripping, XFF,
+      flush-per-chunk SSE), and no SSE framer is needed because responses
+      are never parsed. Deferred: cachestab E3-E6, perf, learn, memory sync,
+      OpenAI live-zone dispatchers.
 
 - [x] (Plan 6) Repo scaffold (v0.1 item 13): tag-push release workflow building
       six reproducible `CGO_ENABLED=0` binaries, and `skills/headroom/SKILL.md`.
