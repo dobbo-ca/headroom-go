@@ -213,8 +213,14 @@ func TestDispatchEmittedMarkersResolve(t *testing.T) {
 	}
 }
 
-// A rejected block must leave no orphan entry in the store.
-func TestDispatchRejectedBlockLeavesNoOrphan(t *testing.T) {
+// A block that every compressor declines forwards verbatim and stores nothing.
+//
+// This covers the Dispatch-level "no_op" branch: a real router runs, no
+// compressor produces a change, and the body must come back byte-identical
+// with an empty CCR store. The I5-rejection path is a different branch and is
+// covered by TestDispatchRejectedBlockLeavesNoOrphanEntry, which forces equal
+// token counts and asserts ReasonAllRejected.
+func TestDispatchIncompressibleBlockForwardsVerbatim(t *testing.T) {
 	// Random-looking text the compressors cannot shrink, above threshold.
 	var b strings.Builder
 	for i := 0; i < 700; i++ {
@@ -225,14 +231,29 @@ func TestDispatchRejectedBlockLeavesNoOrphan(t *testing.T) {
 
 	res := Dispatch(in, opts)
 	if res.Applied {
-		t.Skip("this corpus turned out to be compressible; the orphan check needs a rejection")
+		t.Fatalf("this corpus must stay incompressible for the no_op branch to be covered; got reason %q", res.Reason)
+	}
+	// Assert the branch by name. Without this the test would silently pass on
+	// any other passthrough path and stop covering no_op.
+	if res.Reason != ReasonNoCandidates {
+		t.Errorf("Reason = %q, want %q", res.Reason, ReasonNoCandidates)
+	}
+	var sawNoOp bool
+	for _, bl := range res.Blocks {
+		if bl.Action == "no_op" {
+			sawNoOp = true
+		}
+	}
+	if !sawNoOp {
+		t.Errorf("no no_op outcome recorded; the compressors did something: %+v", res.Blocks)
 	}
 	if opts.Store.Len() != 0 {
-		t.Errorf("store has %d entries after a rejected dispatch, want 0", opts.Store.Len())
+		t.Errorf("store has %d entries after a no-op dispatch, want 0", opts.Store.Len())
 	}
 	if string(res.Body) != string(in) {
-		t.Error("body changed on a rejected dispatch")
+		t.Error("body changed on a no-op dispatch")
 	}
+	assertUntouchedRangesIdentical(t, in, res)
 }
 
 // A short block is skipped by the byte-threshold gate.
