@@ -116,8 +116,10 @@ func newWrapCmd() *cobra.Command {
 }
 
 // spawnProxy starts `headroom proxy` as a detached child using this same
-// executable, so the wrapped agent does not need headroom on its PATH.
-func spawnProxy(upstream string) error {
+// executable, so the wrapped agent does not need headroom on its PATH. It is a
+// variable so tests can exercise the start-the-proxy branch without spawning a
+// second process.
+var spawnProxy = func(upstream string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate the headroom executable: %w", err)
