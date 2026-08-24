@@ -73,8 +73,10 @@ type Options struct {
 	// Router compresses one block's text. A nil Router disables
 	// compression entirely and the body is forwarded verbatim.
 	Router *router.Router
-	// Store receives each rewritten block's original text. A nil Store
-	// disables CCR marker injection.
+	// Store receives each rewritten block's original text. The router's
+	// offload transforms stash the original unconditionally to build a
+	// resolvable CCR marker, so a nil Store disables compression entirely
+	// (every block is forwarded verbatim, like a nil Router).
 	Store ccr.Store
 	// Tokenizer counts tokens for the I5 gate. Nil selects DefaultModel.
 	Tokenizer tokenizer.Tokenizer

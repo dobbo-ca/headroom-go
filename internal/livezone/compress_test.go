@@ -105,6 +105,20 @@ func TestCompressBlockNilRouter(t *testing.T) {
 	}
 }
 
+// A nil Store must decline before the router's offload transforms are
+// reached: they stash the original under the store unconditionally, so a
+// nil Store there would panic rather than raise ok=false.
+func TestCompressBlockNilStoreDeclinesInsteadOfPanicking(t *testing.T) {
+	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
+	res := compressBlock(repetitiveJSONBlock(), Options{Router: router.NewDefault()}, tok)
+	if res.accepted {
+		t.Error("accepted with no Store wired")
+	}
+	if res.action != "no_op" {
+		t.Errorf("action = %q, want no_op", res.action)
+	}
+}
+
 // A compressor that returns the input unchanged must be declined, and must
 // not be counted as a rejection-by-tokens.
 func TestCompressBlockNoOpWhenOutputEqualsInput(t *testing.T) {
@@ -211,6 +225,21 @@ func TestDispatchRejectedBlockLeavesNoOrphanEntry(t *testing.T) {
 	}
 	if _, ok := store.Get(ccr.ComputeKey([]byte(repetitiveJSONBlock()))); ok {
 		t.Error("a rejected block left its original in the store; it must be stored only after the gate accepts")
+	}
+}
+
+// A nil Store is a documented-supported configuration (Options.Store's doc
+// comment). Dispatching a JSON-array block through it must forward the body
+// verbatim, not panic inside the router's offload transforms.
+func TestDispatchNilStoreForwardsVerbatim(t *testing.T) {
+	body := userBodyWithText(t, repetitiveJSONBlock())
+
+	res := Dispatch(body, Options{Router: router.NewDefault(), FrozenCount: 0})
+	if res.Applied {
+		t.Errorf("Applied = true, want a passthrough with no Store wired")
+	}
+	if string(res.Body) != string(body) {
+		t.Error("Body must equal the input verbatim when nothing was rewritten")
 	}
 }
 

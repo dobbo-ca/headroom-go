@@ -52,6 +52,14 @@ func compressBlock(text string, opts Options, tok tokenizer.Tokenizer) blockResu
 	if opts.Router == nil {
 		return blockResult{action: "no_op"}
 	}
+	if opts.Store == nil {
+		// The router's offload transforms (json_offload, diff_noise, the
+		// log/diff/search compressors) stash the original under opts.Store
+		// unconditionally — they have no way to produce a resolvable
+		// marker without one. Bail before Compress rather than let a nil
+		// Store reach a store.Put and panic.
+		return blockResult{action: "no_op"}
+	}
 
 	res := opts.Router.Compress(text, transform.CompressionContext{Query: opts.Query}, opts.Store)
 	if res.Output == "" || res.Output == text {
