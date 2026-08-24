@@ -29,6 +29,13 @@ a CLI wrapper, cutting tokens 60–95% while preserving answers.
       Deferred: the proxy server itself (item 3), POST /v1/retrieve, sjson
       (lands with cachestab E3/E4), OpenAI dispatchers.
 
+- [x] (Plan 6) Repo scaffold (v0.1 item 13): tag-push release workflow building
+      six reproducible `CGO_ENABLED=0` binaries, and `skills/headroom/SKILL.md`.
+      Deferred: `Formula/headroom-go.rb` in dobbo-ca/homebrew-taps, which needs
+      the digests of a real release before it can be seeded. Item 13's "Uplift"
+      was dropped in favour of tag-push; there is no `.uplift.yml`, `.cliff.toml`,
+      or `CHANGELOG.md`.
+
 ## Follow-ups
 
 See the spec's §8 phasing and §10 parity checklist.
