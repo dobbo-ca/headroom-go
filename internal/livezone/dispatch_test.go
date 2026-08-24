@@ -351,3 +351,88 @@ func TestDispatchMultipleBlocksAreOrderedAndSpliced(t *testing.T) {
 		}
 	}
 }
+
+// awkwardBodyWith embeds text as the latest user message's text block inside a
+// body whose UNTOUCHED regions are deliberately hostile to re-serialisation:
+// irregular whitespace, non-alphabetical key order, numeric spellings that
+// json.Marshal would rewrite (1.50 -> 1.5, 1e2 -> 100, 0.500 -> 0.5), unicode,
+// and characters json.Marshal escapes by default (< > &).
+//
+// bodyWith emits compact JSON, so a splice bug that disturbed the untouched
+// bytes could not show up there. This fixture is what makes that bug visible.
+func awkwardBodyWith(text string) []byte {
+	quoted, err := json.Marshal(text)
+	if err != nil {
+		panic(err)
+	}
+	return []byte("{\n" +
+		"  \"temperature\" : 1.50 ,\n" +
+		"  \"system\"      : \"café — you are helpful, a < b && c > d\" ,\n" +
+		"  \"max_tokens\"  : 1e2 ,\n" +
+		"  \"messages\"    : [\n" +
+		"      { \"content\" : [ { \"type\" : \"text\" , \"text\" : \"earlier turn\" } ] , \"role\" : \"user\" } ,\n" +
+		"      { \"role\" : \"assistant\" , \"content\" : [ { \"type\" : \"text\" , \"text\" : \"ack\" } ] } ,\n" +
+		"      { \"role\" : \"user\" , \"content\" : [ { \"type\" : \"text\" , \"text\" : " + string(quoted) + " } ] }\n" +
+		"  ] ,\n" +
+		"  \"top_p\"       : 0.500\n" +
+		"}\n")
+}
+
+// I1 under real compression, on a body whose untouched regions would not
+// survive a round trip through encoding/json. Any splice that regenerates a
+// gap instead of copying it fails here.
+func TestDispatchPreservesAwkwardFormattingAroundACompressedBlock(t *testing.T) {
+	in := awkwardBodyWith(compressibleLog())
+	res := Dispatch(in, liveOptions(t))
+
+	if !res.Applied {
+		t.Fatalf("fixture must actually compress, got reason %q", res.Reason)
+	}
+	if len(res.Rewritten) == 0 {
+		t.Fatal("Applied is true but no ranges were reported")
+	}
+	assertUntouchedRangesIdentical(t, in, res)
+
+	// Every fragment below sits OUTSIDE the rewritten range and must survive
+	// byte for byte. json.Marshal would alter each one.
+	out := string(res.Body)
+	for _, frag := range []string{
+		"  \"temperature\" : 1.50 ,\n",               // trailing zero and spacing
+		"  \"max_tokens\"  : 1e2 ,\n",                // exponent form
+		"  \"top_p\"       : 0.500\n",                // trailing zeros
+		"\"café — you are helpful, a < b && c > d\"", // unicode plus unescaped < > &
+		"{ \"content\" : [ { \"type\" : \"text\" , \"text\" : \"earlier turn\" } ] , \"role\" : \"user\" }", // content-before-role
+		"{ \"role\" : \"assistant\" , \"content\" : [ { \"type\" : \"text\" , \"text\" : \"ack\" } ] }",
+	} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("untouched formatting was not preserved verbatim:\n  want fragment: %q", frag)
+		}
+	}
+	if !strings.HasSuffix(out, "}\n") {
+		t.Error("the trailing gap after the last replacement was not copied verbatim")
+	}
+}
+
+// The same guarantee for the trailing region specifically: bytes after the
+// last rewritten range must be copied, not regenerated.
+func TestDispatchPreservesTrailingBytesAfterTheLastReplacement(t *testing.T) {
+	in := awkwardBodyWith(compressibleLog())
+	res := Dispatch(in, liveOptions(t))
+	if !res.Applied {
+		t.Fatalf("fixture must actually compress, got reason %q", res.Reason)
+	}
+
+	last := res.Rewritten[len(res.Rewritten)-1]
+	wantTail := in[last.End:]
+	// Locate the same tail in the output by reconstructing the cursor.
+	outPos := 0
+	inPos := 0
+	for _, r := range res.Rewritten {
+		outPos += (r.Start - inPos) + r.NewLen
+		inPos = r.End
+	}
+	gotTail := res.Body[outPos:]
+	if string(gotTail) != string(wantTail) {
+		t.Errorf("trailing bytes differ\n want: %q\n got:  %q", wantTail, gotTail)
+	}
+}
