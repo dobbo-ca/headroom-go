@@ -141,18 +141,84 @@ func Dispatch(body []byte, opts Options) Result {
 	}
 
 	slots := planBlocks(bodyStr, msgIdx)
-	var candidates int
-	for _, s := range slots {
-		if s.kind == slotCompressible || s.kind == slotStringContent {
-			candidates++
-		}
-	}
-	if candidates == 0 {
+	if len(slots) == 0 {
 		return passthrough(body, ReasonNoCandidates, frozen)
 	}
 
-	// Task 6 compresses the candidates and Task 7 splices them. Until then
-	// the body is forwarded verbatim, which is what the I1 round-trip test
-	// in roundtrip_test.go pins.
-	return passthrough(body, ReasonNoCandidates, frozen)
+	tok := opts.Tokenizer
+	if tok == nil {
+		tok = tokenizer.GetTokenizer(DefaultModel)
+	}
+
+	var (
+		reps      []replacement
+		outcomes  []BlockOutcome
+		before    int
+		after     int
+		candidate bool
+	)
+	for _, s := range slots {
+		switch s.kind {
+		case slotHotZone:
+			outcomes = append(outcomes, BlockOutcome{
+				Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone"})
+			continue
+		case slotBelowThreshold:
+			outcomes = append(outcomes, BlockOutcome{
+				Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold"})
+			continue
+		}
+
+		br := compressBlock(s.text, opts, tok)
+		outcomes = append(outcomes, BlockOutcome{
+			Index:        s.blockIndex,
+			BlockType:    s.blockType,
+			Action:       br.action,
+			Strategy:     br.strategy,
+			TokensBefore: br.tokensBefore,
+			TokensAfter:  br.tokensAfter,
+			CacheKey:     br.cacheKey,
+		})
+		if br.action == "rejected_tokens" {
+			// ReasonAllRejected is reserved for blocks that actually failed
+			// the I5 token gate. A "no_op" (no Router wired, or the router
+			// returned the input unchanged) never attempted compression, so
+			// it must not count toward that reason.
+			candidate = true
+		}
+		if !br.accepted {
+			continue
+		}
+
+		// The original is stored only now, after the gate accepted, so a
+		// rejected block never leaves an orphan CCR entry. Every emitted
+		// marker therefore resolves.
+		if opts.Store != nil && br.cacheKey != "" {
+			opts.Store.Put(br.cacheKey, s.text)
+		}
+		reps = append(reps, replacement{
+			start: s.start, end: s.end, repl: encodeJSONString(br.replacement)})
+		before += br.tokensBefore
+		after += br.tokensAfter
+	}
+
+	if len(reps) == 0 {
+		reason := ReasonNoCandidates
+		if candidate {
+			reason = ReasonAllRejected
+		}
+		return Result{Body: body, Applied: false, Reason: reason, FrozenCount: frozen, Blocks: outcomes}
+	}
+
+	out, ranges := applyReplacements(body, reps)
+	return Result{
+		Body:         out,
+		Applied:      true,
+		Reason:       ReasonOK,
+		FrozenCount:  frozen,
+		Rewritten:    ranges,
+		Blocks:       outcomes,
+		TokensBefore: before,
+		TokensAfter:  after,
+	}
 }
