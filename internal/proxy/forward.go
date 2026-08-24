@@ -108,9 +108,3 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 		"reason", string(res.Reason), "bytes_in", len(body), "bytes_out", len(res.Body))
 	return res.Body, &res
 }
-
-// copyResponse streams the upstream body to the client. Task 5 adds the
-// flushing path for SSE.
-func (s *Server) copyResponse(w http.ResponseWriter, resp *http.Response) {
-	_, _ = io.Copy(w, resp.Body)
-}
