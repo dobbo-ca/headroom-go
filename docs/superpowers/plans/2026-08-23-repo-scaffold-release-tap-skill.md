@@ -236,6 +236,22 @@ jobs:
 - [ ] **Step 2: Lint the workflow**
 
 Run: `actionlint .github/workflows/release.yml`
+
+Expected: exactly two findings, both about `actions/create-github-app-token@v3`
+— `missing input "app-id"` and `input "client-id" is not defined`. Both are
+false positives from a stale bundled action database in actionlint 1.7.12. The
+live `action.yml` declares `client-id` and marks `app-id` deprecated with
+"Use 'client-id' instead", and the identical pair fires on `graphify-go`'s
+release workflow, which ships releases. Do **not** switch to `app-id` to make
+the linter green; that is fixing the gate instead of the thing.
+
+Confirm nothing else is wrong:
+
+```bash
+actionlint -ignore 'missing input "app-id"' \
+           -ignore 'input "client-id" is not defined' \
+           .github/workflows/release.yml
+```
 Expected: no output, exit status 0.
 
 - [ ] **Step 3: Execute the build stage for real**
