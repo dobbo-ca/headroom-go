@@ -165,3 +165,71 @@ func TestEncodeJSONStringIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Start and End index the INPUT body, so a length-changing replacement must
+// not shift the offsets reported for the ones after it. The lockstep walk is
+// how callers reconstruct the untouched bytes.
+func TestApplyReplacementsRangesAreInputOffsets(t *testing.T) {
+	orig := []byte(`["AAAAAA","BBBBBB","CCCCCC"]`)
+	a := bytes.Index(orig, []byte(`"AAAAAA"`))
+	b := bytes.Index(orig, []byte(`"BBBBBB"`))
+	c := bytes.Index(orig, []byte(`"CCCCCC"`))
+
+	reps := []replacement{
+		{start: a, end: a + 8, repl: []byte(`"a"`)},
+		{start: b, end: b + 8, repl: []byte(`"bb"`)},
+		{start: c, end: c + 8, repl: []byte(`"ccc"`)},
+	}
+	out, ranges := applyReplacements(orig, reps)
+
+	want := []Range{
+		{Start: a, End: a + 8, NewLen: 3},
+		{Start: b, End: b + 8, NewLen: 4},
+		{Start: c, End: c + 8, NewLen: 5},
+	}
+	if len(ranges) != len(want) {
+		t.Fatalf("got %d ranges, want %d", len(ranges), len(want))
+	}
+	for i := range want {
+		if ranges[i] != want[i] {
+			t.Errorf("range %d = %+v, want %+v", i, ranges[i], want[i])
+		}
+	}
+
+	// Walking orig and out in lockstep with the reported ranges must
+	// reproduce out exactly.
+	var walk []byte
+	inCur, outCur := 0, 0
+	for _, r := range ranges {
+		walk = append(walk, orig[inCur:r.Start]...)
+		outCur += r.Start - inCur
+		walk = append(walk, out[outCur:outCur+r.NewLen]...)
+		outCur += r.NewLen
+		inCur = r.End
+	}
+	walk = append(walk, orig[inCur:]...)
+	if !bytes.Equal(walk, out) {
+		t.Errorf("lockstep walk = %q, want %q", walk, out)
+	}
+}
+
+// A replacement whose end runs past the body must be dropped, not panic and
+// not truncate the body.
+func TestApplyReplacementsDropsOutOfBounds(t *testing.T) {
+	orig := []byte(`0123456789`)
+	reps := []replacement{
+		{start: 1, end: 3, repl: []byte(`X`)},
+		{start: 8, end: 99, repl: []byte(`Y`)},
+		{start: 5, end: 4, repl: []byte(`Z`)},
+	}
+	out, ranges := applyReplacements(orig, reps)
+	if string(out) != `0X3456789` {
+		t.Errorf("out = %q, want %q", out, `0X3456789`)
+	}
+	if len(ranges) != 1 {
+		t.Fatalf("got %d ranges, want 1: %+v", len(ranges), ranges)
+	}
+	if ranges[0] != (Range{Start: 1, End: 3, NewLen: 1}) {
+		t.Errorf("range = %+v", ranges[0])
+	}
+}

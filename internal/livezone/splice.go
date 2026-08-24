@@ -30,12 +30,14 @@ func applyReplacements(orig []byte, reps []replacement) ([]byte, []Range) {
 	copy(sorted, reps)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
 
-	removed, added := 0, 0
+	// Sized from the additions only: a malformed rep (end past the body, or
+	// end before start) would make a removed-bytes total nonsense, and a
+	// negative capacity panics before the per-rep guard below can drop it.
+	added := 0
 	for _, r := range sorted {
-		removed += r.end - r.start
 		added += len(r.repl)
 	}
-	out := make([]byte, 0, len(orig)-removed+added)
+	out := make([]byte, 0, len(orig)+added)
 	ranges := make([]Range, 0, len(sorted))
 
 	cursor := 0
