@@ -20,10 +20,6 @@ Or download a binary from [Releases](https://github.com/dobbo-ca/headroom-go/rel
 go install github.com/dobbo-ca/headroom-go/cmd/headroom@latest
 ```
 
-Releases are cut by pushing a `v*` tag. Every binary is built with
-`CGO_ENABLED=0` and stamped only with its version, so a rebuild from the same
-tag produces the same bytes.
-
 ## Semantic cache (opt-in, off by default)
 
 The gateway can return a stored provider response when a new request is

@@ -5,10 +5,8 @@ description: Use when a command or tool has returned a large blob of output — 
 
 # headroom — compress tool output before you read it
 
-Large tool output is the main way a context window fills up. headroom shrinks
-logs, diffs, JSON, and search results by 60–95% while keeping the parts that
-answer a question. The original is never lost: it is stored under a hash you
-can retrieve.
+headroom shrinks logs, diffs, JSON, and search results by 60–95% while keeping
+the parts that answer a question.
 
 ## The loop
 
@@ -36,18 +34,17 @@ can retrieve.
 
 ## Reading the result
 
-`headroom_compress` returns `original_tokens` and `compressed_tokens` alongside
-`compressed`. It never returns something more expensive than what you gave it:
-when compression would not help, you get the original back unchanged, with
-`bytes_saved: 0` and an empty `hash`. An empty `hash` therefore means there is
-nothing to retrieve, because nothing was replaced.
+`headroom_compress` never returns something more expensive than what you gave
+it: when compression would not help, you get the original back unchanged, with
+`bytes_saved: 0` and an empty `hash`. An empty `hash` means there is nothing to
+retrieve.
 
-`steps_applied` names which transforms ran, and `content_type` names what
-headroom decided the blob was. Both are useful when the result surprises you.
+`original_tokens` and `compressed_tokens` say how much it saved, `steps_applied`
+names which transforms ran, and `content_type` names what headroom decided the
+blob was. The last two are useful when the result surprises you.
 
-`headroom_stats` reports session totals — calls, bytes, tokens, and cache hit
-rates. Use it to answer "how much did this actually save?", not as part of the
-compress loop.
+`headroom_stats` reports session totals across every call. Use it to answer "how
+much did this actually save?", not as part of the compress loop.
 
 ## If the tools are missing
 
