@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # One runner covers every target: headroom-go is CGO_ENABLED=0, so darwin and
+  # windows binaries cross-compile from Linux. graphify-go needs native runners
+  # only because tree-sitter forces cgo on it.
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          case "$VERSION" in
+            v[0-9]*) ;;
+            *) echo "refusing to release non-version ref: $VERSION" >&2; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Version is the only thing stamped in. A timestamp or commit SHA in
+      # -ldflags would make the binaries unreproducible, and main.go declares
+      # no variable to hold either.
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            BIN=headroom
+            [ "$GOOS" = "windows" ] && BIN=headroom.exe
+            echo "--- building $GOOS/$GOARCH"
+            GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "$BIN" ./cmd/headroom
+
+            # Reproducibility gate: the same source and the same flags must
+            # produce the same bytes. Rebuild and compare before packaging.
+            GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "${BIN}.again" ./cmd/headroom
+            if ! cmp -s "$BIN" "${BIN}.again"; then
+              echo "build is not reproducible for $GOOS/$GOARCH" >&2
+              exit 1
+            fi
+            rm "${BIN}.again"
+
+            NAME="headroom-go-${VERSION}-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              zip -q "dist/${NAME}.zip" "$BIN"
+              ARCHIVE="dist/${NAME}.zip"
+            else
+              tar czf "dist/${NAME}.tar.gz" "$BIN"
+              ARCHIVE="dist/${NAME}.tar.gz"
+            fi
+            sha256sum "$ARCHIVE" | awk '{print $1}' > "${ARCHIVE}.sha256"
+            rm "$BIN"
+          done
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The tap's update-formulas.yml rewrites Formula/headroom-go.rb in place and
+  # exits 1 if that file does not already exist. Seed it before the first tag.
+  update-homebrew:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GH_PUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_PUB_APP_PEM }}
+          owner: dobbo-ca
+          repositories: homebrew-taps
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Extract SHA256 checksums
+        id: checksums
+        run: |
+          set -euo pipefail
+          for target in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+            key="$(echo "$target" | tr '-' '_')"
+            echo "${key}=$(cat dist/headroom-go-*-${target}.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Trigger Homebrew tap update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: dobbo-ca/homebrew-taps
+          event-type: update-formula
+          client-payload: |
+            {
+              "formula": "headroom-go",
+              "version": "${{ needs.build.outputs.version }}",
+              "darwin_amd64_sha": "${{ steps.checksums.outputs.darwin_amd64 }}",
+              "darwin_arm64_sha": "${{ steps.checksums.outputs.darwin_arm64 }}",
+              "linux_amd64_sha": "${{ steps.checksums.outputs.linux_amd64 }}",
+              "linux_arm64_sha": "${{ steps.checksums.outputs.linux_arm64 }}"
+            }
