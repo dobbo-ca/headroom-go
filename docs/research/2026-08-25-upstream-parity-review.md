@@ -102,19 +102,17 @@ tracked in beads.
 `SearchOffload (registered)` and `SmartCrusher byte-parity` are marked **skip**
 in §10 and are correctly absent. Everything marked **v0.1** is present.
 
-### One upstream behaviour worth a decision
+### The `[1m]` suffix: measured, and a non-issue
 
 Upstream strips a trailing `[1m]` context-tier suffix from `model` before
 dispatch (`compression/mod.rs:113`, PR-2027), because the Anthropic API
-rejects the suffix. We do not. This is not a silent drop — we never ported the
-CLI feature that appends `[1m]` — but any client that sends such a model ID
-through `headroom proxy` gets a 400 that upstream would have absorbed.
+rejects it. We do not.
 
-Note the cost of upstream's version: it re-serialises the whole body with
-`serde_json::to_vec`, disturbing exactly the whitespace and key order the rest
-of the architecture protects. Porting it would need byte-range surgery on the
-`model` value instead, and it mutates a cache-hot byte either way. Decision
-required before building.
+Captured from real Claude Code traffic through the proxy: it sends
+`"model":"claude-sonnet-5"`. No suffix. The suffix is appended by upstream's
+own CLI, which we never ported, so nothing in this stack can produce one.
+
+Not worth building. Bead `hr-nax` closed as measured-not-needed.
 
 ## 4. Defects found by real-API contact
 
@@ -193,7 +191,65 @@ Against `api.anthropic.com`, a 25674-byte request, `User-Agent: claude-cli/`
 Captured to `internal/proxy/testdata/live/`. `livefixture_test.go` replays
 those bytes in the ordinary suite — no tag, no network, no credential.
 
-## 6. Shared risk, not a divergence
+## 6. The real gap: headroom saves nothing on real Claude Code traffic
+
+Captured by pointing `ANTHROPIC_BASE_URL` at `headroom proxy` and running
+`claude -p "say hi" --model sonnet`. A redacted copy of that body — same
+structure, block counts, `cache_control` placement, tool count and byte sizes,
+every string value replaced by filler — is
+`internal/proxy/testdata/live/claude_code_request_redacted.json`.
+
+```
+174550-byte request        what the dispatcher can reach
++-------------------+      +-------------------+
+| tools      76.9%  |      |                   |  never walked
+| messages   18.6%  | ===> | messages   17.9%  |  walked
+| system      6.8%  |      |                   |  never walked
++-------------------+      +-------------------+
+                             of which eligible: 0 bytes
+```
+
+Bytes in 174550, bytes out 174550. Zero CCR markers. Three independent
+reasons, each sufficient on its own:
+
+1. **`no_live_zone`.** Claude Code puts a `cache_control` marker on the LAST
+   message (`messages[1]`, a mid-conversation `system` message — the
+   `mid-conversation-system-2026-04-07` beta). `ComputeFrozenCount` returns 2
+   over 2 messages, so no message is live. This is I2/I3 working exactly as
+   designed, and it makes the proxy a no-op.
+2. **`no_candidates`.** Force the floor to 0 and it still does nothing. The
+   11 KB block is conversational prose and markdown; no heuristic compressor
+   (log, diff, search, JSON) recognises that shape, so the router returns it
+   unchanged. The other block is 6 bytes, below the 512-byte threshold.
+3. **Structural.** 76.9% of the request is `tools` and 6.8% is `system`. The
+   live-zone dispatcher only ever walks `messages[*].content[*]`, so it cannot
+   reach 82% of the bytes even in principle.
+
+The existing "34 KB to 8 KB" result comes from `compressibleLog()` — 300
+identical log lines, precisely the shape the compressors are built for, and
+not what Claude Code sends.
+
+### What would actually move the needle
+
+In rough order of payoff against this evidence:
+
+- **Tool-schema compression.** 76.9% of the bytes, sent on every single
+  request, largely static. Upstream has `tool_schema_savings_policy.py` and
+  `tool_name_policy.py`. Nothing in headroom-go touches `tools`.
+- **A `cache_control`-aware live zone.** Upstream's `cache_control_policy`
+  can be disabled, which sets the floor to 0. We hardcode `FrozenCount: -1`
+  with no switch. That switch is not one of the six recorded divergences and
+  it decides whether the product does anything at all. Note the trade is real:
+  floor 0 means mutating cache-pinned bytes, which is what I2/I3 forbid.
+- **A prose compressor.** Everything the dispatcher can reach is prose. The
+  heuristic detector has no branch for it; `kompress-go` (LLMLingua-2) is the
+  tracked answer and is not built.
+
+`TestLiveFixtureClaudeCodeRequestIsNotCompressed` pins all three reasons. It
+fails loudly the day any of them stops being true, so the win cannot land
+unnoticed and the regression cannot either.
+
+## 7. Shared risk, not a divergence
 
 `defaultListen` is `0.0.0.0:8787`. Upstream's default is the same
 (`config.rs:280`). It binds every interface, so anyone on the LAN can use the

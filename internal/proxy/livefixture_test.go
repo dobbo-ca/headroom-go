@@ -1,12 +1,21 @@
 package proxy
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dobbo-ca/headroom-go/internal/cachecontrol"
+	"github.com/dobbo-ca/headroom-go/internal/livezone"
+	"github.com/dobbo-ca/headroom-go/internal/router"
+	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
+	"github.com/tidwall/gjson"
 )
 
 // The fixtures under testdata/live are real bytes from api.anthropic.com,
@@ -119,4 +128,91 @@ func TestLiveFixtureRecordsARealSaving(t *testing.T) {
 	if h.Get("X-Headroom-Upstream-Echo") != "" {
 		t.Error("an x-headroom-* header came back from upstream; the outbound strip failed")
 	}
+}
+
+// What headroom actually does to a real Claude Code request.
+//
+// The fixture is a genuine `claude -p` request body captured through
+// `headroom proxy`, with every string value replaced by filler of the same
+// length. Structure, block counts, cache_control placement, tool count and
+// byte sizes are the real ones; no private content survives.
+//
+// The result is uncomfortable and must not regress silently: headroom
+// compresses NOTHING. This test pins that, so the day a change makes the
+// proxy earn its keep on real traffic, this test fails and someone updates
+// it deliberately.
+func TestLiveFixtureClaudeCodeRequestIsNotCompressed(t *testing.T) {
+	body := readFixture(t, "claude_code_request_redacted.json")
+
+	var upstreamBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer up.Close()
+
+	store := newMapStore()
+	srv := New(Deps{
+		Config: Config{Upstream: up.URL, MaxBodyBytes: 32 << 20, Compress: true,
+			RequestTimeout: 30 * time.Second, DialTimeout: 10 * time.Second},
+		Store: store, Router: router.NewDefault(),
+		Tokenizer: tokenizer.GetTokenizer("claude"), Version: "fixture",
+	})
+	front := httptest.NewServer(srv.Handler())
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if len(upstreamBody) != len(body) {
+		t.Fatalf("upstream got %d bytes, client sent %d -- headroom now compresses real "+
+			"Claude Code traffic. That is the goal: update this test deliberately",
+			len(upstreamBody), len(body))
+	}
+	if store.Len() != 0 {
+		t.Errorf("store holds %d entries for an uncompressed request", store.Len())
+	}
+
+	// Reason one: Claude Code cache-pins the LAST message, so the frozen
+	// floor covers every message and there is no live zone at all.
+	frozen, _ := cachecontrol.ComputeFrozenCount(body)
+	res := livezone.Dispatch(body, livezone.Options{
+		Router: router.NewDefault(), Store: newMapStore(),
+		Tokenizer: tokenizer.GetTokenizer(livezone.DefaultModel), FrozenCount: -1})
+	if res.Reason != livezone.ReasonNoLiveZone {
+		t.Errorf("Reason = %q, want %q (frozen floor %d over %d messages)",
+			res.Reason, livezone.ReasonNoLiveZone, frozen,
+			gjson.GetBytes(body, "messages.#").Int())
+	}
+
+	// Reason two, independent of the first: even with the floor forced to 0,
+	// nothing in the live zone is compressible. The big block is
+	// conversational prose, which no heuristic compressor recognises; the
+	// other is below the byte threshold.
+	unfrozen := livezone.Dispatch(body, livezone.Options{
+		Router: router.NewDefault(), Store: newMapStore(),
+		Tokenizer: tokenizer.GetTokenizer(livezone.DefaultModel), FrozenCount: 0})
+	if unfrozen.Applied {
+		t.Errorf("with the frozen floor ignored the body compressed after all (reason %q); "+
+			"the cache_control floor is then the only thing suppressing savings", unfrozen.Reason)
+	}
+	if unfrozen.Reason != livezone.ReasonNoCandidates {
+		t.Errorf("unfrozen Reason = %q, want %q", unfrozen.Reason, livezone.ReasonNoCandidates)
+	}
+
+	// Reason three, structural: three quarters of the request is `tools`, and
+	// the dispatcher only ever walks messages[*].content[*].
+	total := int64(len(body))
+	tools := int64(len(gjson.GetBytes(body, "tools").Raw))
+	if pct := 100 * tools / total; pct < 60 {
+		t.Errorf("tools are %d%% of the body; the fixture no longer shows why "+
+			"a messages-only dispatcher cannot help here", pct)
+	}
+	t.Logf("real shape: %d bytes total, tools %d%%, dispatcher can reach messages only",
+		total, 100*tools/total)
 }
