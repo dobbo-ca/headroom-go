@@ -2,6 +2,7 @@ package livezone
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -265,6 +266,63 @@ func TestDispatchRejectedBlockLeavesNoOrphanEntry(t *testing.T) {
 	if _, ok := store.Get(ccr.ComputeKey([]byte(repetitiveJSONBlock()))); ok {
 		t.Error("a rejected block left its original in the store; it must be stored only after the gate accepts")
 	}
+	// Checking the BLAKE3 key alone is not enough. The router's offload
+	// transforms key their own copy of the original with ComputeKeyMD5, so a
+	// hash-specific assertion passes while the store still holds an orphan.
+	// Count entries instead: after a rejection the store must be untouched.
+	if n := store.Len(); n != 0 {
+		t.Errorf("store holds %d entries after a rejected block; want 0 (orphans no marker on the wire can name)", n)
+	}
+}
+
+// Every retrieval hash the compressed body carries must resolve. The live-zone
+// dispatcher appends <<ccr:HASH>>, and the compressors append their own
+// "hash=HASH" note; both travel upstream, so both must be backed by a stored
+// original. Asserting over the hashes actually present in the body means a new
+// marker format cannot be added without its store write.
+func TestDispatchEveryHashInTheBodyResolves(t *testing.T) {
+	store := newMapStore()
+	text := repetitiveJSONBlock()
+	body := userBodyWithText(t, text)
+
+	res := Dispatch(body, Options{
+		Router: router.NewDefault(), Store: store,
+		Tokenizer: tokenizer.GetTokenizer(DefaultModel), FrozenCount: 0})
+	if !res.Applied {
+		t.Fatalf("fixture did not compress (reason %q); it cannot exercise marker resolution", res.Reason)
+	}
+
+	hashes := hashesIn(string(res.Body))
+	if len(hashes) == 0 {
+		t.Fatal("the compressed body carries no retrieval hash at all")
+	}
+	for _, h := range hashes {
+		if _, ok := store.Get(h); !ok {
+			t.Errorf("hash %s appears in the body sent upstream but resolves to nothing", h)
+		}
+	}
+	// SmartCrusher keys individual crushed cells, so not every hash on the
+	// wire names the whole block. The dispatcher's own marker always does.
+	whole, ok := store.Get(ccr.ComputeKey([]byte(text)))
+	if !ok {
+		t.Fatal("the dispatcher's <<ccr:> marker does not resolve")
+	}
+	if whole != text {
+		t.Errorf("the dispatcher's marker resolves to %d bytes; want the %d-byte original",
+			len(whole), len(text))
+	}
+}
+
+// hashRe matches both marker shapes the wire carries: the dispatcher's
+// <<ccr:HASH>> and a compressor's "hash=HASH".
+var bodyHashRe = regexp.MustCompile(`(?:<<ccr:|hash=)([0-9a-f]{24})`)
+
+func hashesIn(body string) []string {
+	var out []string
+	for _, m := range bodyHashRe.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 // A nil Store is a documented-supported configuration (Options.Store's doc
