@@ -79,18 +79,48 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 	}
 
 	mode := policy.ClassifyHeader(r.Header)
-	s.observeCacheStability(r, body)
+	sessionKey := cachestab.SessionKey(r.Header, r.RemoteAddr, body)
+	s.observeCacheStability(sessionKey, body)
+
+	// The real frozen floor is what the PREVIOUS turn of this session sent,
+	// not where the client put its newest cache_control marker. That marker
+	// is a cache WRITE instruction for bytes the provider has never seen;
+	// reading it as a read guarantee freezes the whole conversation, which
+	// is why headroom saves nothing on an agent client today.
+	//
+	// A first turn floors at 0, and that is safe rather than reckless: the
+	// fresh pass only ever touches the LATEST user message, which is the
+	// one the client just appended and the provider has never seen. Without
+	// this, a block is never compressed on the turn it first appears, so it
+	// never enters the replay map and the feature does nothing at all.
+	frozen, replay := -1, s.sessionReplay(sessionKey, body)
+	if replay != nil {
+		frozen = replay.Floor()
+	}
 	res := livezone.Dispatch(body, livezone.Options{
 		Policy:      policy.ForMode(mode),
 		Router:      s.deps.Router,
 		Store:       s.deps.Store,
 		Tokenizer:   s.deps.Tokenizer,
-		FrozenCount: -1,
+		FrozenCount: frozen,
+		Replay:      replay,
 	})
 	slog.Debug("live-zone dispatch",
 		"path", r.URL.Path, "auth_mode", mode.String(), "applied", res.Applied,
-		"reason", string(res.Reason), "bytes_in", len(body), "bytes_out", len(res.Body))
+		"reason", string(res.Reason), "bytes_in", len(body), "bytes_out", len(res.Body),
+		"frozen_count", res.FrozenCount, "replay", replay != nil,
+		"replay_first_turn", replay != nil && replay.FirstTurn())
 	return res.Body, &res
+}
+
+// sessionReplay opens this turn's replay handle, or returns nil when replay
+// is off. It is the ONLY path by which per-session state reaches the bytes
+// forwarded upstream.
+func (s *Server) sessionReplay(sessionKey string, body []byte) *cachestab.SessionReplay {
+	if s.replay == nil {
+		return nil
+	}
+	return s.replay.Begin(sessionKey, body)
 }
 
 // observeCacheStability runs the two cache-stabilization detectors over the
@@ -100,7 +130,7 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 // This runs before the dispatcher deliberately. The detectors describe what
 // the CLIENT sent, which is what the customer can act on; describing our own
 // output would just report our own compression as drift.
-func (s *Server) observeCacheStability(r *http.Request, body []byte) {
+func (s *Server) observeCacheStability(sessionKey string, body []byte) {
 	for _, f := range cachestab.DetectVolatile(body) {
 		slog.Warn("volatile content in the cached prefix will bust prompt-cache hits",
 			"event", "volatile_content_detected",
@@ -110,8 +140,7 @@ func (s *Server) observeCacheStability(r *http.Request, body []byte) {
 	if s.drift == nil {
 		return
 	}
-	key := cachestab.SessionKey(r.Header, r.RemoteAddr, body)
-	obs := s.drift.Observe(key, cachestab.ComputeStructuralHash(body))
+	obs := s.drift.Observe(sessionKey, cachestab.ComputeStructuralHash(body))
 	switch {
 	case obs.FirstRequest:
 		slog.Debug("cache drift baseline recorded",

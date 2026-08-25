@@ -180,3 +180,35 @@ func TestFlagUpstreamIsValidatedAndTrimmed(t *testing.T) {
 		t.Errorf("Upstream = %q, want no trailing slash", c.Upstream)
 	}
 }
+
+// Replay mutates bytes inside the cache-frozen prefix, so it is off unless an
+// operator asks for it — and asking must actually work. A flag that parses to
+// nothing ships dead, and this repo has done that before.
+func TestReplayIsOffByDefaultAndOptedInByEnv(t *testing.T) {
+	t.Setenv("HEADROOM_PROXY_UPSTREAM", "https://api.anthropic.com")
+
+	for _, v := range []string{"", "off", "false", "0", "no", "disabled", "maybe"} {
+		t.Run("off:"+v, func(t *testing.T) {
+			t.Setenv("HEADROOM_PROXY_REPLAY", v)
+			c, err := Load(Overrides{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Replay {
+				t.Errorf("HEADROOM_PROXY_REPLAY=%q must leave replay off", v)
+			}
+		})
+	}
+	for _, v := range []string{"enabled", "on", "true", "1", "yes", "ON", " True "} {
+		t.Run("on:"+v, func(t *testing.T) {
+			t.Setenv("HEADROOM_PROXY_REPLAY", v)
+			c, err := Load(Overrides{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.Replay {
+				t.Errorf("HEADROOM_PROXY_REPLAY=%q must enable replay", v)
+			}
+		})
+	}
+}

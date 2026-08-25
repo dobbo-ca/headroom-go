@@ -74,6 +74,31 @@ headroom proxy
 | — | `HEADROOM_PROXY_MAX_BODY_BYTES` | `33554432` (32 MiB) | Request body cap; `0` means uncapped |
 | — | `HEADROOM_PROXY_TIMEOUT_SECONDS` | `600` | Per-request context deadline (there is no client-wide timeout, so long SSE streams are never cut) |
 | — | `HEADROOM_PROXY_COMPRESS` | on | Set to `disabled`, `off`, `false`, `0`, or `no` to forward request bodies unmodified |
+| — | `HEADROOM_PROXY_REPLAY` | off | Set to `enabled`, `on`, `true`, `1`, or `yes` to re-send a compressed block in its compressed form on every later turn of the same session |
+
+#### `HEADROOM_PROXY_REPLAY`
+
+Without replay, headroom saves nothing on an agent client such as Claude Code.
+The client marks its newest message with `cache_control` and re-sends the whole
+conversation every turn, so the frozen floor swallows the entire body.
+
+That marker is a cache **write** instruction for bytes the provider has never
+seen, not a read guarantee. Replay lets headroom compress the newest message
+and then reproduce those exact bytes on every later turn, so the provider's
+cached prefix keeps matching. Compressing without replaying is worse than doing
+nothing: the client re-sends the original, the prefix no longer matches, and
+every turn pays a fresh cache write.
+
+Two things to know before turning it on:
+
+- **Run `headroom mcp serve` against the same CCR store.** With replay on, the
+  model no longer sees its own earlier tool results and recovers them by
+  calling `headroom_retrieve`. Without the MCP server it sees `<<ccr:HASH>>`
+  markers it cannot dereference, for the whole session rather than one turn.
+- **Sessions are identified by `x-claude-code-session-id`**, falling back to
+  `x-headroom-session-id`, then to a credential-and-first-message fingerprint.
+  A client that sends neither header still works; replay simply does not fire,
+  and the proxy behaves exactly as it does with replay off.
 
 `GET /healthz` reports the proxy itself; `GET /healthz/upstream` checks the
 configured upstream. `POST /v1/retrieve` is headroom's own route — it is

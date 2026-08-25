@@ -35,6 +35,10 @@ type Server struct {
 	// drift holds the per-session cache-prefix baselines. Observation only:
 	// it never reaches the bytes forwarded upstream.
 	drift *cachestab.DriftState
+	// replay holds the per-session block compressions to reproduce on
+	// every later turn. Unlike drift this DOES reach the bytes forwarded
+	// upstream, so it is nil unless Config.Replay is on.
+	replay *cachestab.ReplayState
 }
 
 // New builds a Server. The HTTP client deliberately has NO client-wide
@@ -59,9 +63,15 @@ func New(d Deps) *Server {
 	// unparseable upstream is a programming error.
 	target, _ := url.Parse(d.Config.Upstream)
 
+	var replay *cachestab.ReplayState
+	if d.Config.Replay {
+		replay = cachestab.NewReplayState(cachestab.DefaultReplayCapacity)
+	}
+
 	return &Server{
-		deps:  d,
-		drift: cachestab.NewDriftState(cachestab.DefaultDriftCapacity),
+		deps:   d,
+		drift:  cachestab.NewDriftState(cachestab.DefaultDriftCapacity),
+		replay: replay,
 		client: &http.Client{
 			Transport: transport,
 			// Never follow redirects: hand the 3xx back to the client so it
