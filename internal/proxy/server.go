@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/router"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
@@ -31,6 +32,9 @@ type Server struct {
 	deps   Deps
 	client *http.Client
 	fwd    *httputil.ReverseProxy
+	// drift holds the per-session cache-prefix baselines. Observation only:
+	// it never reaches the bytes forwarded upstream.
+	drift *cachestab.DriftState
 }
 
 // New builds a Server. The HTTP client deliberately has NO client-wide
@@ -56,7 +60,8 @@ func New(d Deps) *Server {
 	target, _ := url.Parse(d.Config.Upstream)
 
 	return &Server{
-		deps: d,
+		deps:  d,
+		drift: cachestab.NewDriftState(cachestab.DefaultDriftCapacity),
 		client: &http.Client{
 			Transport: transport,
 			// Never follow redirects: hand the 3xx back to the client so it
