@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/livezone"
 	"github.com/dobbo-ca/headroom-go/internal/policy"
 )
@@ -78,6 +79,7 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 	}
 
 	mode := policy.ClassifyHeader(r.Header)
+	s.observeCacheStability(r, body)
 	res := livezone.Dispatch(body, livezone.Options{
 		Policy:      policy.ForMode(mode),
 		Router:      s.deps.Router,
@@ -89,4 +91,37 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 		"path", r.URL.Path, "auth_mode", mode.String(), "applied", res.Applied,
 		"reason", string(res.Reason), "bytes_in", len(body), "bytes_out", len(res.Body))
 	return res.Body, &res
+}
+
+// observeCacheStability runs the two cache-stabilization detectors over the
+// buffered body. Both are READ-ONLY and log only: they take the bytes and
+// return findings, so no path here can reach the bytes forwarded upstream.
+//
+// This runs before the dispatcher deliberately. The detectors describe what
+// the CLIENT sent, which is what the customer can act on; describing our own
+// output would just report our own compression as drift.
+func (s *Server) observeCacheStability(r *http.Request, body []byte) {
+	for _, f := range cachestab.DetectVolatile(body) {
+		slog.Warn("volatile content in the cached prefix will bust prompt-cache hits",
+			"event", "volatile_content_detected",
+			"kind", string(f.Kind), "location", f.Location, "sample", f.Sample)
+	}
+
+	if s.drift == nil {
+		return
+	}
+	key := cachestab.SessionKey(r.Header, r.RemoteAddr, body)
+	obs := s.drift.Observe(key, cachestab.ComputeStructuralHash(body))
+	switch {
+	case obs.FirstRequest:
+		slog.Debug("cache drift baseline recorded",
+			"event", "cache_drift_first_request", "session", obs.SessionDigest)
+	case obs.Drifted():
+		slog.Warn("the cached prefix changed between turns; the provider cache was re-written",
+			"event", "cache_drift_observed",
+			"session", obs.SessionDigest, "dimensions", strings.Join(obs.Dims, ","))
+	default:
+		slog.Debug("cached prefix stable",
+			"event", "cache_prefix_stable", "session", obs.SessionDigest)
+	}
 }

@@ -248,7 +248,7 @@ func GetTokenizer(model string) Tokenizer // registered-HF > tiktoken(estimator 
 | tokenizer | `tokenizer` | `pkoukk/tiktoken-go` + `tiktoken-go-loader` | HF backend (`daulet/tokenizers`, cgo) = follow-up |
 | auth/policy | `policy` | stdlib `net/http`, `strings` | Direct port |
 | cache-control walk | `cachecontrol` | `tidwall/gjson`, `log/slog` | warn-not-reject on TTL violation |
-| cache-stabilization | `cachestab` | `tidwall/gjson`+`sjson`, `hashicorp/golang-lru/v2`, `crypto/sha256` | E3/E4/E5/E6. Self-consistent hashing (no Rust byte-parity). "Move-to-tail" CacheAligner = doc-only, skip |
+| cache-stabilization | `cachestab` | `tidwall/gjson`, `crypto/sha256`, `encoding/json` | E5/E6 shipped with **no new dependency**: `encoding/json` already marshals map keys in sorted order, so canonicalisation is free, and a 25-line FIFO-capped map replaces `hashicorp/golang-lru/v2`. `sjson` stays unneeded until E3/E4, which mutate. Self-consistent hashing (no Rust byte-parity). "Move-to-tail" CacheAligner = doc-only, skip |
 | proxy server | `proxy`, `headers`, `sse` | `net/http` + `go-chi/chi/v5`, hand-rolled forward | SSE flush-per-chunk is load-bearing. Compresses **requests** (Decision A); responses verbatim |
 | CLI/MCP/learn/perf | `cmd/headroom`, `mcp`, `learn`, `perf` | `spf13/cobra`+`pflag`, `mark3labs/mcp-go`, `anthropics/anthropic-sdk-go` | learn: claude plugin first, single Anthropic call. perf: regex+KV parse. wrap: claude+codex |
 | config/paths/memory | `config`, `paths`, `memory` | stdlib `flag`/`envconfig`, `dustin/go-humanize`, `modernc.org/sqlite`, `google/uuid` | **MVP = pure-logic cross-agent sync** (sha256[:16] dedup, echo-back prevention, Claude+Codex adapters) + flat SQLite + FTS5. Vectors/semantic = follow-up |
@@ -363,7 +363,8 @@ Magika ONNX detection; exact Anthropic tokenizer; OpenAI dispatchers; SmartCrush
 | Proxy passthrough + headers + health + flushing SSE | `proxy`,`headers`,`sse` | **v0.2** |
 | Proxy request-body compression wired (Decision A) | `proxy` | **v0.2** |
 | Bedrock / Vertex / WebSocket / /metrics | `proxy` | followup |
-| cachestab E3/E4/E5/E6 | `cachestab` | **v0.2** |
+| cachestab E5 (volatile detector) / E6 (drift detector) | `cachestab` | **v0.2** |
+| cachestab E3/E4 (cache_control auto-place, prompt_cache_key) | `cachestab` | followup (PAYG-gated upstream; needs a decision) |
 | cachestab E1/E2 + move-to-tail + Phase-E auto-inject | `cachestab` | followup |
 | MCP compress / retrieve / stats | `mcp` | **v0.1** |
 | MCP cross-process stats / memory tools | `mcp` | followup |
