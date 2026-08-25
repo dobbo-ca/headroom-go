@@ -1,0 +1,14 @@
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a309a2f3cbec2ed2-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: application/json
+Date: Tue, 25 Aug 2026 09:40:39 GMT
+Request-Id: req_011CePFERoEMJ9BcorVS1Lzs
+Server: cloudflare
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Vary: Accept-Encoding
+X-Headroom-Bytes-Saved: 25107
+X-Headroom-Tokens-After: 104
+X-Headroom-Tokens-Before: 6307
+X-Robots-Tag: none
+X-Should-Retry: false
