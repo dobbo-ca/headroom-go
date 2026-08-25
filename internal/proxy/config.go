@@ -28,6 +28,18 @@ type Config struct {
 	RequestTimeout time.Duration
 	DialTimeout    time.Duration
 	Compress       bool
+	// Replay re-sends a previously compressed block in its compressed form
+	// on every later turn of the same session, so the provider's cached
+	// prefix keeps matching. It is what makes compressing anything the
+	// client re-sends worth doing at all.
+	//
+	// OFF by default, and deliberately so: with replay on, the model no
+	// longer sees its own earlier tool results and can only recover them
+	// by calling headroom_retrieve. That needs `headroom mcp serve`
+	// running against the same CCR store. Turning this on without the MCP
+	// server leaves the model looking at <<ccr:HASH>> markers it cannot
+	// dereference, for the whole session rather than for one turn.
+	Replay bool
 }
 
 // Overrides carries command-line values; empty means unset.
@@ -39,6 +51,9 @@ type Overrides struct {
 // offValues disable a boolean setting. Same vocabulary the rest of the
 // project uses, so operators do not need a second one.
 var offValues = map[string]bool{"disabled": true, "off": true, "false": true, "0": true, "no": true}
+
+// onValues enable a setting that is off by default. Mirror of offValues.
+var onValues = map[string]bool{"enabled": true, "on": true, "true": true, "1": true, "yes": true}
 
 // Load resolves the proxy configuration with flag > env > default precedence.
 func Load(ov Overrides) (Config, error) {
@@ -75,6 +90,7 @@ func Load(ov Overrides) (Config, error) {
 	c.DialTimeout = defaultDialTimeout
 
 	c.Compress = !offValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_COMPRESS")))]
+	c.Replay = onValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_REPLAY")))]
 	return c, nil
 }
 

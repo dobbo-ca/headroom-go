@@ -12,6 +12,7 @@ package livezone
 
 import (
 	"github.com/dobbo-ca/headroom-go/internal/cachecontrol"
+	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/policy"
 	"github.com/dobbo-ca/headroom-go/internal/router"
@@ -85,13 +86,30 @@ type Options struct {
 	FrozenCount int
 	// Query biases relevance scoring inside the compressors.
 	Query string
+	// Replay re-applies a previous turn's compression to any block this
+	// session has compressed before, ANYWHERE in the body — including deep
+	// inside the cache-frozen prefix.
+	//
+	// That is safe only because it reproduces byte-for-byte what the
+	// provider already cached, NOT because the frozen zone became
+	// writable. Without it, compressing a block the client re-sends every
+	// turn costs a cache miss per turn: the client re-sends the ORIGINAL,
+	// which no longer matches the compressed prefix the provider stored,
+	// so the hit truncates at that block and everything after it is
+	// re-written at full price.
+	//
+	// Nil disables replay and Dispatch behaves as it did before.
+	Replay *cachestab.SessionReplay
 }
 
 // BlockOutcome records what happened to one content block.
 type BlockOutcome struct {
+	// MessageIndex is the block's message index. The replay pass walks the
+	// whole conversation, so Index alone no longer identifies a block.
+	MessageIndex int
 	Index        int
 	BlockType    string
-	Action       string // "compressed","hot_zone","below_threshold","no_op","rejected_tokens"
+	Action       string // "compressed","replayed","hot_zone","below_threshold","no_op","rejected_tokens"
 	Strategy     string
 	TokensBefore int
 	TokensAfter  int
@@ -137,42 +155,47 @@ func Dispatch(body []byte, opts Options) Result {
 	}
 
 	bodyStr := string(body)
-	msgIdx, ok := findLatestUserMessage(bodyStr, frozen)
-	if !ok {
-		return passthrough(body, ReasonNoLiveZone, frozen)
-	}
-
-	slots := planBlocks(bodyStr, msgIdx)
-	if len(slots) == 0 {
-		return passthrough(body, ReasonNoCandidates, frozen)
-	}
 
 	tok := opts.Tokenizer
 	if tok == nil {
 		tok = tokenizer.GetTokenizer(DefaultModel)
 	}
 
-	var (
-		reps      []replacement
-		outcomes  []BlockOutcome
-		before    int
-		after     int
-		candidate bool
-	)
+	// Replay runs FIRST and over the whole conversation. A block this
+	// session already compressed must be reproduced wherever it now sits,
+	// or the prefix the provider cached no longer matches what arrives.
+	// The fresh pass below skips anything replay already claimed.
+	reps, outcomes, before, after := replayAll(bodyStr, root, opts, tok)
+	claimed := make(map[int]bool, len(reps))
+	for _, r := range reps {
+		claimed[r.start] = true
+	}
+
+	msgIdx, liveOK := findLatestUserMessage(bodyStr, frozen)
+	var slots []planSlot
+	if liveOK {
+		slots = planBlocks(bodyStr, msgIdx)
+	}
+
+	candidate := false
 	for _, s := range slots {
+		if claimed[s.start] {
+			continue
+		}
 		switch s.kind {
 		case slotHotZone:
 			outcomes = append(outcomes, BlockOutcome{
-				Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone"})
 			continue
 		case slotBelowThreshold:
 			outcomes = append(outcomes, BlockOutcome{
-				Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold"})
 			continue
 		}
 
 		br := compressBlock(s.text, opts, tok)
 		outcomes = append(outcomes, BlockOutcome{
+			MessageIndex: msgIdx,
 			Index:        s.blockIndex,
 			BlockType:    s.blockType,
 			Action:       br.action,
@@ -198,6 +221,12 @@ func Dispatch(body []byte, opts Options) Result {
 		// marker therefore resolves.
 		if opts.Store != nil && br.cacheKey != "" {
 			opts.Store.Put(br.cacheKey, s.text)
+			// Every later turn in this session must reproduce these exact
+			// bytes for this block, or compressing it here costs a cache
+			// miss per turn instead of saving anything.
+			if opts.Replay != nil {
+				opts.Replay.Record(br.cacheKey, br.replacement)
+			}
 		}
 		reps = append(reps, replacement{
 			start: s.start, end: s.end, repl: encodeJSONString(br.replacement)})
@@ -206,6 +235,12 @@ func Dispatch(body []byte, opts Options) Result {
 	}
 
 	if len(reps) == 0 {
+		switch {
+		case !liveOK:
+			return passthrough(body, ReasonNoLiveZone, frozen)
+		case len(slots) == 0:
+			return passthrough(body, ReasonNoCandidates, frozen)
+		}
 		reason := ReasonNoCandidates
 		if candidate {
 			reason = ReasonAllRejected
