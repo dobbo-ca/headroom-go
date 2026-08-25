@@ -193,7 +193,8 @@ func Dispatch(body []byte, opts Options) Result {
 		}
 
 		// The original is stored only now, after the gate accepted, so a
-		// rejected block never leaves an orphan CCR entry. Every emitted
+		// rejected block never leaves an orphan CCR entry. compressBlock
+		// stages the router's own writes for the same reason. Every emitted
 		// marker therefore resolves.
 		if opts.Store != nil && br.cacheKey != "" {
 			opts.Store.Put(br.cacheKey, s.text)
