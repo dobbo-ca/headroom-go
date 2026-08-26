@@ -173,7 +173,7 @@ prompt cache did about it, because bytes saved with a busted cache is a loss.
 WHAT HEADROOM DID
   turns             142   (96 compressed)
   bytes sent        18.9 MB of 20.6 MB
-  whole-body saving 8.3%   <- what a user actually sees
+  bytes saved       8.3%   (wire bytes; not tokens, not the bill)
   blocks replayed   311
   strategies        log_offload 61, log_template 35
 

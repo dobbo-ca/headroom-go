@@ -22,8 +22,8 @@ func Format(r Report) string {
 	w("WHAT HEADROOM DID\n")
 	w("  turns             %s   (%s compressed)\n", num(r.Turns), num(r.CompressedTurns))
 	w("  sessions          %s\n", num(r.Sessions))
-	if len(r.Modes) > 0 {
-		w("  auth modes        %s\n", counted(r.Modes))
+	if modes := counted(r.Modes); modes != "" {
+		w("  auth modes        %s\n", modes)
 	}
 	if r.TokensRemoved() > 0 {
 		w("  tokens removed    %s of %s in the blocks it rewrote\n",
@@ -34,7 +34,7 @@ func Format(r Report) string {
 		if r.Metered() {
 			w("  input tokens never sent   %s\n", pct(share))
 		} else {
-			w("  context-window headroom  %s\n", pct(share))
+			w("  context-window headroom (cumulative)  %s\n", pct(share))
 		}
 	}
 	w("  bytes sent        %s of %s\n", bytesOf(r.BytesOut), bytesOf(r.BytesIn))
@@ -44,11 +44,11 @@ func Format(r Report) string {
 	if r.Replayed > 0 {
 		w("  blocks replayed   %s   (re-sent compressed, so the prefix stayed byte-stable)\n", num(r.Replayed))
 	}
-	if len(r.Strategies) > 0 {
-		w("  strategies        %s\n", counted(r.Strategies))
+	if strategies := counted(r.Strategies); strategies != "" {
+		w("  strategies        %s\n", strategies)
 	}
-	if len(r.Reasons) > 0 {
-		w("  outcomes          %s\n", counted(r.Reasons))
+	if outcomes := counted(r.Reasons); outcomes != "" {
+		w("  outcomes          %s\n", outcomes)
 	}
 
 	w("\nWHAT THE CACHE DID          from Claude Code's own usage records\n")
@@ -241,7 +241,9 @@ func group(n int64) string {
 func counted(m map[string]int) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
-		keys = append(keys, k)
+		if k != "" {
+			keys = append(keys, k)
+		}
 	}
 	// Most frequent first, name as the tiebreak so the output is stable.
 	sort.Slice(keys, func(i, j int) bool {

@@ -137,8 +137,9 @@ func (r Report) CostRange() (low, high float64) {
 // ledger does not count either. A wrong "you have no bill" claim contradicts
 // an invoice; a wrong cost claim only carries the assumption it already states.
 //
-// Strictly more than half the turns must be subscription. A tie is metered.
-func (r Report) Metered() bool { return r.Modes[policy.Subscription.String()]*2 <= r.Turns }
+// Returns false (subscription headline) only when ALL turns are subscription.
+// Any mixture, any unknown mode, any pre-v0.2 entry — all treated as metered.
+func (r Report) Metered() bool { return r.Modes[policy.Subscription.String()] < r.Turns }
 
 // JoinSound reports whether the ledger and the usage records plausibly
 // describe the same traffic.

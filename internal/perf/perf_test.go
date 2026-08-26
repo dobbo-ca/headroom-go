@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -376,7 +377,8 @@ func TestSubscriptionReportHeadlinesWindowHeadroom(t *testing.T) {
 // An entry with no Mode field (ledger written before v0.2) must count as
 // metered. Unknown is the safest default: a wrong "no bill" claim
 // contradicts an invoice; a wrong cost claim only carries the assumption
-// it already states.
+// it already states. Spec test 5: both unknown and payg must produce the
+// metered headline and verdict, proving Mode="" is handled as metered.
 func TestUnknownModeIsTreatedAsMetered(t *testing.T) {
 	digest := cachestab.ClaudeSessionDigest("unknown-mode-test")
 	entries := []ledger.Entry{
@@ -389,26 +391,47 @@ func TestUnknownModeIsTreatedAsMetered(t *testing.T) {
 		t.Errorf("entry with Mode='' must count as metered, got Metered()=%v", r.Metered())
 	}
 
-	// Both unknown and payg must produce the metered headline.
+	// Both unknown and payg must produce the metered headline and verdict.
 	payg := entries[0]
 	payg.Mode = "payg"
 	rPayg := Build([]ledger.Entry{payg}, sessions)
 	outUnknown := Format(r)
 	outPayg := Format(rPayg)
+
+	// Both must have the metered headline.
 	if !strings.Contains(outUnknown, "input tokens never sent") {
 		t.Errorf("unknown-mode output missing metered headline:\n%s", outUnknown)
 	}
 	if !strings.Contains(outPayg, "input tokens never sent") {
 		t.Errorf("payg output missing metered headline:\n%s", outPayg)
 	}
-	if strings.Contains(outUnknown, "context-window headroom") || strings.Contains(outPayg, "context-window headroom") {
-		t.Errorf("subscription label leaked into metered report")
+
+	// Neither must have the subscription headline.
+	if strings.Contains(outUnknown, "context-window headroom") {
+		t.Errorf("subscription label leaked into unknown-mode report:\n%s", outUnknown)
+	}
+	if strings.Contains(outPayg, "context-window headroom") {
+		t.Errorf("subscription label leaked into payg report:\n%s", outPayg)
+	}
+
+	// Both must have the same metered verdict (mentions "input bill").
+	if !strings.Contains(outUnknown, "of your input bill") {
+		t.Errorf("unknown-mode missing metered verdict:\n%s", outUnknown)
+	}
+	if !strings.Contains(outPayg, "of your input bill") {
+		t.Errorf("payg missing metered verdict:\n%s", outPayg)
+	}
+
+	// Unknown mode must NOT show a garbage/unlabelled auth modes line.
+	// The old bug was printing "auth modes         1" (just a count, no label).
+	if strings.Contains(outUnknown, "auth modes") {
+		t.Errorf("unknown-mode should not show auth modes line (mode is empty):\n%s", outUnknown)
 	}
 }
 
-// Metered() must require more than half the turns to be subscription. A
-// tie is metered (the safest default). Table: 2 sub / 3 payg => metered;
-// 3 sub / 2 payg => subscription; 2 sub / 2 payg => metered.
+// Metered() returns false (subscription headline) only when ALL turns are
+// subscription. Any mixture is treated as metered (safest default).
+// Table: 0 payg => subscription; any payg => metered.
 func TestSubscriptionNeedsMoreThanHalfTheTurns(t *testing.T) {
 	digest := cachestab.ClaudeSessionDigest("majority-test")
 	sessions := []Session{{Digest: digest, Turns: []Usage{usage(100, 900, 0, 0)}}}
@@ -418,9 +441,10 @@ func TestSubscriptionNeedsMoreThanHalfTheTurns(t *testing.T) {
 		want      bool   // true = metered
 		label     string // which headline should appear
 	}{
-		{2, 3, true, "input tokens never sent"},  // minority subscription
-		{3, 2, false, "context-window headroom"}, // majority subscription
-		{2, 2, true, "input tokens never sent"},  // tie is metered
+		{2, 3, true, "input tokens never sent"},  // minority subscription => metered
+		{3, 2, true, "input tokens never sent"},  // majority but not all => metered
+		{2, 2, true, "input tokens never sent"},  // tie => metered
+		{5, 0, false, "context-window headroom"}, // all subscription
 	}
 
 	for _, tc := range cases {
@@ -439,6 +463,49 @@ func TestSubscriptionNeedsMoreThanHalfTheTurns(t *testing.T) {
 		if !strings.Contains(out, tc.label) {
 			t.Errorf("%d sub / %d payg: output missing '%s':\n%s", tc.sub, tc.payg, tc.label, out)
 		}
+	}
+}
+
+// The headline must print TokensAvoidedShare(), not WholeBodySaving(). This
+// is the entire point of hr-onk. Fixture where bytes=50% but tokens=4.8%.
+func TestHeadlinePrintsTokenShareNotByteShare(t *testing.T) {
+	digest := cachestab.ClaudeSessionDigest("headline-value-test")
+	// Fixture: 50 tokens removed, 1000 billed = 4.8% token share.
+	// Bytes: 2000 in, 1000 out = 50% byte saving.
+	entries := []ledger.Entry{
+		{Session: digest, Mode: "payg", TokensBefore: 100, TokensAfter: 50, BytesIn: 2000, BytesOut: 1000},
+	}
+	sessions := []Session{{Digest: digest, Turns: []Usage{usage(100, 900, 0, 0)}}}
+	r := Build(entries, sessions)
+
+	// Confirm fixture is shaped correctly: bytes differ from tokens.
+	if r.WholeBodySaving() != 0.5 {
+		t.Fatalf("fixture WholeBodySaving = %v, want 0.5", r.WholeBodySaving())
+	}
+	tokenShare := r.TokensAvoidedShare()
+	if tokenShare >= 0.49 || tokenShare <= 0.04 {
+		t.Fatalf("fixture TokensAvoidedShare = %v, want ~0.048 (not near bytes 0.5)", tokenShare)
+	}
+
+	out := Format(r)
+	// The headline must show the token share (~4.8%), not the byte share (50%).
+	wantLine := fmt.Sprintf("input tokens never sent   %s", pct(tokenShare))
+	if !strings.Contains(out, wantLine) {
+		t.Errorf("headline missing or wrong value:\nwant: %s\ngot:\n%s", wantLine, out)
+	}
+	// Bytes must appear on a separate, labelled line.
+	if !strings.Contains(out, "bytes saved       50.0%") {
+		t.Errorf("bytes saved line missing or wrong:\n%s", out)
+	}
+
+	// Same for subscription mode.
+	subEntry := entries[0]
+	subEntry.Mode = "subscription"
+	rSub := Build([]ledger.Entry{subEntry}, sessions)
+	outSub := Format(rSub)
+	wantLineSub := fmt.Sprintf("context-window headroom (cumulative)  %s", pct(rSub.TokensAvoidedShare()))
+	if !strings.Contains(outSub, wantLineSub) {
+		t.Errorf("subscription headline missing or wrong value:\nwant: %s\ngot:\n%s", wantLineSub, outSub)
 	}
 }
 
