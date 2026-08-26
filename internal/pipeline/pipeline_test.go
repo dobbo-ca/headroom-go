@@ -108,14 +108,14 @@ func TestReformatEarlyStopAtTargetRatio(t *testing.T) {
 }
 
 func TestOffloadFallbackRunsAllNonzeroBloat(t *testing.T) {
-	// No reformat ran, so reformatRatio == 1.0 > 0.85 (fallback path). Every
-	// offload with bloat > 0 runs, even the low-bloat one below the 0.5 threshold.
+	// No reformat ran, so reformatRatio == 1.0 > 0.85 (fallback path). The first
+	// offload with bloat > 0 runs, then early-stop prevents compounding.
 	hi := fakeOffload{name: "hi", types: []transform.ContentType{transform.JsonArray}, bloat: 0.9, out: "off", saved: 5, key: "k1"}
 	lo := fakeOffload{name: "lo", types: []transform.ContentType{transform.JsonArray}, bloat: 0.1, out: "off2", saved: 5, key: "k2"}
 	p := NewBuilder().WithOffload(hi).WithOffload(lo).Build()
 	r := p.Run("input-with-no-reformat", transform.JsonArray, transform.CompressionContext{}, newStore(t))
-	if len(r.CacheKeys) != 2 {
-		t.Fatalf("CacheKeys = %v, want both offloads via fallback path", r.CacheKeys)
+	if len(r.CacheKeys) != 1 || r.CacheKeys[0] != "k1" {
+		t.Fatalf("CacheKeys = %v, want [k1] (early-stop after first offload)", r.CacheKeys)
 	}
 }
 

@@ -1,0 +1,4 @@
+     1	package broken
+     2
+     3	func Foo() {
+     4		x := 1

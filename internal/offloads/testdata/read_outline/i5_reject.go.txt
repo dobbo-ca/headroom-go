@@ -1,0 +1,4 @@
+     1	package i5test
+     2
+     3	// OneLineFuncThatWouldNotBenefitFromOutlining is intentionally verbose in its name and signature.
+     4	func OneLineFuncThatWouldNotBenefitFromOutliningBecauseTheSignatureIsAlreadyLongerThanTheBody(arg1, arg2, arg3 int) { return }

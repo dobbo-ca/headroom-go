@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -161,14 +162,21 @@ var releasableReadTypes = map[transform.ContentType]bool{
 
 // ReadOutputIsProtected reports whether a tool_result must be kept byte-exact.
 //
-// toolName is the producing tool ("Read", "Bash", …) and command is the shell
-// command for Bash, or "" otherwise. Protection is decided in two steps, both
-// upstream's: is this a file read at all, and if so is the CONTENT a data type
-// that is never byte-patched.
-func ReadOutputIsProtected(toolName, command string, contentType transform.ContentType) bool {
+// toolName is the producing tool ("Read", "Bash", …), command is the shell
+// command for Bash (or ""), and filePath is the file_path from tool_input (or "").
+// Protection is decided in two steps, both upstream's: is this a file read at all,
+// and if so is the CONTENT a data type that is never byte-patched.
+//
+// The detector cannot see through Read's line-number prefixes: measured 2026-08-26,
+// 0 of 53 MB of Read output classifies SourceCode, and 10.31 MB of source read via
+// Read classified BuildOutput and was shredded ~80% by log_offload. The EXTENSION
+// is unambiguous where the content heuristics are not, so it overrides the
+// releasable set.
+func ReadOutputIsProtected(toolName, command, filePath string, contentType transform.ContentType) bool {
 	isRead := false
 	switch toolName {
-	case "Read", "read_file", "view":
+	case "Read", "read_file", "view", "cat",
+		"mcp__filesystem__read_text_file", "mcp__fs__read_text_file":
 		isRead = true
 	case "Bash", "bash", "shell", "run_command":
 		isRead = IsReadCommand(command)
@@ -176,5 +184,23 @@ func ReadOutputIsProtected(toolName, command string, contentType transform.Conte
 	if !isRead {
 		return false
 	}
+	// Code file reads are protected regardless of detected content type.
+	if codeExt := codeExtensionFromPath(filePath); codeExt != "" {
+		return true
+	}
 	return !releasableReadTypes[contentType]
+}
+
+// codeExtensionFromPath returns the lowercase file extension if it's in the
+// code allowlist, or "" otherwise. Kept as a separate function so the offloads
+// package can export its own CodeExtension without a dependency cycle.
+func codeExtensionFromPath(path string) string {
+	// Inline check to avoid importing offloads (import cycle).
+	// This is the same allowlist as offloads.codeExtensions.
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".java", ".rb", ".c", ".h", ".cpp", ".cc", ".hpp":
+		return ext
+	}
+	return ""
 }

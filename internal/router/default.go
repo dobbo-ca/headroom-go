@@ -9,26 +9,29 @@ import (
 )
 
 // NewDefault wires the v0.1 heuristic compressors into a Router: JSON minify +
-// log templating reformats, and the diff_noise/diff/json/log offloads. SearchOffload
-// is intentionally NOT registered (matches upstream). JsonOffload uses the Plan-3
-// SmartCrusher, injected here at the composition root — smartcrusher imports
+// log templating reformats, and the diff_noise/diff/json/log/text offloads.
+// SearchOffload is intentionally NOT registered (matches upstream). JsonOffload uses
+// the Plan-3 SmartCrusher, injected here at the composition root — smartcrusher imports
 // offloads for the seam type, so offloads cannot import smartcrusher; this router
 // is the only production package free to import both.
 //
-// Registration order (= run order) matches upstream offloads/mod.rs:
+// ReadOutline is DISABLED by default: measured net token loss of 223,365 (−0.65pp of
+// all tool_result content, −2.20% of baseline saving). The outline wins 961,327 tokens
+// on Go reads but costs 1,185,529 tokens leaked through the same root cause (detector
+// cannot see through Read's line-number prefixes) on .md/.cs/.svelte/.sh/.yml. To enable,
+// uncomment the ReadOutline line below. To make it worth enabling: fix the detector's
+// blindness to line-number prefixes once, for all extensions, and re-measure.
+//
+// Registration order (= run order):
 //   - reformats: JsonMinifier ([JsonArray]) -> LogTemplate ([BuildOutput])
 //   - offloads:  DiffNoise ([GitDiff]) -> DiffOffload ([GitDiff]) ->
 //     JsonOffload ([JsonArray]) -> LogOffload ([BuildOutput]) ->
 //     TextOffload ([PlainText])
-//
-// TextOffload has no upstream counterpart in this position: upstream reaches
-// its TextCrusher through the ContentRouter's PlainText -> TEXT strategy. The
-// effect is the same, and before it the PlainText bucket had no compressor at
-// all — 34.9% of a real 171.9 MB corpus, reached by nothing.
 func NewDefault() *Router {
 	p := pipeline.NewBuilder().
 		WithReformat(reformats.JsonMinifier{}).
 		WithReformat(reformats.LogTemplate{}).
+		// WithOffload(offloads.NewReadOutline()).  // DISABLED: net loss, see comment above
 		WithOffload(offloads.NewDiffNoise()).
 		WithOffload(offloads.NewDiffOffload(compress.NewDiffCompressor())).
 		WithOffload(offloads.NewJsonOffloadWith(smartcrusher.NewSmartCrusher(smartcrusher.DefaultConfig()))).

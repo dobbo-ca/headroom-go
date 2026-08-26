@@ -65,31 +65,35 @@ func TestIsReadCommand(t *testing.T) {
 // data type nobody byte-patches. PlainText must stay protected — the code
 // detector knows only a few languages, so Ruby, C, SQL and Markdown all land
 // there, and releasing PlainText would lossy-compress code the agent is about
-// to patch.
+// to patch. Code file extensions override the content type: a .go read that
+// classifies as BuildOutput is still protected.
 func TestReadOutputIsProtected(t *testing.T) {
 	tests := []struct {
-		name  string
-		tool  string
-		cmd   string
-		ctype transform.ContentType
-		want  bool
+		name     string
+		tool     string
+		cmd      string
+		filePath string
+		ctype    transform.ContentType
+		want     bool
 	}{
-		{"Read of prose", "Read", "", transform.PlainText, true},
-		{"Read of unrecognised code lands in PlainText", "Read", "", transform.PlainText, true},
-		{"Read of a build log is releasable", "Read", "", transform.BuildOutput, false},
-		{"Read of a diff is releasable", "Read", "", transform.GitDiff, false},
-		{"Read of search output is releasable", "Read", "", transform.SearchResults, false},
-		{"bash cat of prose", "Bash", "cat notes.md", transform.PlainText, true},
-		{"bash grep is derived", "Bash", "grep -rn foo .", transform.PlainText, false},
-		{"bash go test is derived", "Bash", "go test -v ./...", transform.PlainText, false},
-		{"unknown tool is not a read", "", "", transform.PlainText, false},
-		{"WebFetch is not a file read", "WebFetch", "", transform.PlainText, false},
+		{"Read of prose", "Read", "", "notes.txt", transform.PlainText, true},
+		{"Read of unrecognised code lands in PlainText", "Read", "", "script.rb", transform.PlainText, true},
+		{"Read of a build log is releasable", "Read", "", "", transform.BuildOutput, false},
+		{"Read of a diff is releasable", "Read", "", "", transform.GitDiff, false},
+		{"Read of search output is releasable", "Read", "", "", transform.SearchResults, false},
+		{"bash cat of prose", "Bash", "cat notes.md", "notes.md", transform.PlainText, true},
+		{"bash grep is derived", "Bash", "grep -rn foo .", "", transform.PlainText, false},
+		{"bash go test is derived", "Bash", "go test -v ./...", "", transform.PlainText, false},
+		{"unknown tool is not a read", "", "", "", transform.PlainText, false},
+		{"WebFetch is not a file read", "WebFetch", "", "", transform.PlainText, false},
+		{"Go file read overrides BuildOutput", "Read", "", "main.go", transform.BuildOutput, true},
+		{"Python file read overrides BuildOutput", "Bash", "cat script.py", "script.py", transform.BuildOutput, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := detect.ReadOutputIsProtected(tt.tool, tt.cmd, tt.ctype); got != tt.want {
-				t.Errorf("ReadOutputIsProtected(%q,%q,%v) = %v, want %v",
-					tt.tool, tt.cmd, tt.ctype, got, tt.want)
+			if got := detect.ReadOutputIsProtected(tt.tool, tt.cmd, tt.filePath, tt.ctype); got != tt.want {
+				t.Errorf("ReadOutputIsProtected(%q,%q,%q,%v) = %v, want %v",
+					tt.tool, tt.cmd, tt.filePath, tt.ctype, got, tt.want)
 			}
 		})
 	}
