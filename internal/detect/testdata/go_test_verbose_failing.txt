@@ -1,0 +1,445 @@
+=== RUN   TestInjectCCRMarkerAppendsAtEnd
+--- PASS: TestInjectCCRMarkerAppendsAtEnd (0.00s)
+=== RUN   TestInjectCCRMarkerSingleNewline
+--- PASS: TestInjectCCRMarkerSingleNewline (0.00s)
+=== RUN   TestInjectCCRMarkerDoesNotWriteToStore
+--- PASS: TestInjectCCRMarkerDoesNotWriteToStore (0.00s)
+=== RUN   TestInjectCCRMarkerNilStoreIsNoOp
+--- PASS: TestInjectCCRMarkerNilStoreIsNoOp (0.00s)
+=== RUN   TestI5RejectsWhenTokensDoNotShrink
+=== RUN   TestI5RejectsWhenTokensDoNotShrink/strictly_smaller_is_accepted
+=== RUN   TestI5RejectsWhenTokensDoNotShrink/equal_is_rejected
+=== RUN   TestI5RejectsWhenTokensDoNotShrink/larger_is_rejected
+--- PASS: TestI5RejectsWhenTokensDoNotShrink (0.00s)
+    --- PASS: TestI5RejectsWhenTokensDoNotShrink/strictly_smaller_is_accepted (0.00s)
+    --- PASS: TestI5RejectsWhenTokensDoNotShrink/equal_is_rejected (0.00s)
+    --- PASS: TestI5RejectsWhenTokensDoNotShrink/larger_is_rejected (0.00s)
+=== RUN   TestCompressBlockNilRouter
+--- PASS: TestCompressBlockNilRouter (0.00s)
+=== RUN   TestCompressBlockNilStoreDeclinesInsteadOfPanicking
+--- PASS: TestCompressBlockNilStoreDeclinesInsteadOfPanicking (0.00s)
+=== RUN   TestCompressBlockNoOpWhenOutputEqualsInput
+--- PASS: TestCompressBlockNoOpWhenOutputEqualsInput (0.00s)
+=== RUN   TestCompressBlockMarkerIsInsideTheGatedText
+--- PASS: TestCompressBlockMarkerIsInsideTheGatedText (0.00s)
+=== RUN   TestDispatchStoresOriginalUnderTheEmittedMarker
+--- PASS: TestDispatchStoresOriginalUnderTheEmittedMarker (0.00s)
+=== RUN   TestDispatchReportsTokenAccounting
+--- PASS: TestDispatchReportsTokenAccounting (0.00s)
+=== RUN   TestDispatchRejectedBlockLeavesNoOrphanEntry
+--- PASS: TestDispatchRejectedBlockLeavesNoOrphanEntry (0.00s)
+=== RUN   TestDispatchEveryHashInTheBodyResolves
+--- PASS: TestDispatchEveryHashInTheBodyResolves (0.00s)
+=== RUN   TestDispatchNilStoreForwardsVerbatim
+--- PASS: TestDispatchNilStoreForwardsVerbatim (0.00s)
+=== RUN   TestDispatchIsDeterministic
+--- PASS: TestDispatchIsDeterministic (0.03s)
+=== RUN   TestDispatchIsDeterministicWithASharedStore
+--- PASS: TestDispatchIsDeterministicWithASharedStore (0.03s)
+=== RUN   TestDispatchDeterministicAcrossCorpus
+=== RUN   TestDispatchDeterministicAcrossCorpus/irregular_whitespace
+=== RUN   TestDispatchDeterministicAcrossCorpus/non_alphabetical_key_order
+=== RUN   TestDispatchDeterministicAcrossCorpus/numeric_formatting
+=== RUN   TestDispatchDeterministicAcrossCorpus/unicode_and_escapes
+=== RUN   TestDispatchDeterministicAcrossCorpus/html_chars_that_Marshal_would_escape
+=== RUN   TestDispatchDeterministicAcrossCorpus/block_content
+=== RUN   TestDispatchDeterministicAcrossCorpus/hot_zone_blocks_only
+=== RUN   TestDispatchDeterministicAcrossCorpus/with_system_and_tools
+=== RUN   TestDispatchDeterministicAcrossCorpus/minimal
+=== RUN   TestDispatchDeterministicAcrossCorpus/multi_turn_with_markers
+=== RUN   TestDispatchDeterministicAcrossCorpus/empty_messages
+=== RUN   TestDispatchDeterministicAcrossCorpus/trailing_newline
+--- PASS: TestDispatchDeterministicAcrossCorpus (0.01s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/irregular_whitespace (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/non_alphabetical_key_order (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/numeric_formatting (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/unicode_and_escapes (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/html_chars_that_Marshal_would_escape (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/block_content (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/hot_zone_blocks_only (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/with_system_and_tools (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/minimal (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/multi_turn_with_markers (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/empty_messages (0.00s)
+    --- PASS: TestDispatchDeterministicAcrossCorpus/trailing_newline (0.00s)
+=== RUN   TestDispatchIsDeterministicWithMultipleBlocks
+--- PASS: TestDispatchIsDeterministicWithMultipleBlocks (0.07s)
+=== RUN   TestDispatchRealCompressionPreservesUntouchedRanges
+--- PASS: TestDispatchRealCompressionPreservesUntouchedRanges (0.00s)
+=== RUN   TestDispatchOutputIsValidJSON
+--- PASS: TestDispatchOutputIsValidJSON (0.00s)
+=== RUN   TestDispatchNeverTouchesFrozenPrefix
+--- PASS: TestDispatchNeverTouchesFrozenPrefix (0.00s)
+=== RUN   TestDispatchRespectsCacheControlFloor
+--- PASS: TestDispatchRespectsCacheControlFloor (0.00s)
+=== RUN   TestDispatchNeverCompressesHotZoneBlocks
+=== RUN   TestDispatchNeverCompressesHotZoneBlocks/tool_use
+=== RUN   TestDispatchNeverCompressesHotZoneBlocks/thinking
+=== RUN   TestDispatchNeverCompressesHotZoneBlocks/redacted_thinking
+=== RUN   TestDispatchNeverCompressesHotZoneBlocks/compaction
+--- PASS: TestDispatchNeverCompressesHotZoneBlocks (0.00s)
+    --- PASS: TestDispatchNeverCompressesHotZoneBlocks/tool_use (0.00s)
+    --- PASS: TestDispatchNeverCompressesHotZoneBlocks/thinking (0.00s)
+    --- PASS: TestDispatchNeverCompressesHotZoneBlocks/redacted_thinking (0.00s)
+    --- PASS: TestDispatchNeverCompressesHotZoneBlocks/compaction (0.00s)
+=== RUN   TestDispatchEmittedMarkersResolve
+--- PASS: TestDispatchEmittedMarkersResolve (0.00s)
+=== RUN   TestDispatchIncompressibleBlockForwardsVerbatim
+--- PASS: TestDispatchIncompressibleBlockForwardsVerbatim (0.00s)
+=== RUN   TestDispatchBelowThresholdIsSkipped
+--- PASS: TestDispatchBelowThresholdIsSkipped (0.00s)
+=== RUN   TestDispatchExplicitFrozenCountOverridesDerived
+--- PASS: TestDispatchExplicitFrozenCountOverridesDerived (0.00s)
+=== RUN   TestDispatchMultipleBlocksAreOrderedAndSpliced
+--- PASS: TestDispatchMultipleBlocksAreOrderedAndSpliced (0.00s)
+=== RUN   TestDispatchPreservesAwkwardFormattingAroundACompressedBlock
+--- PASS: TestDispatchPreservesAwkwardFormattingAroundACompressedBlock (0.00s)
+=== RUN   TestDispatchPreservesTrailingBytesAfterTheLastReplacement
+--- PASS: TestDispatchPreservesTrailingBytesAfterTheLastReplacement (0.00s)
+=== RUN   TestFindLatestUserMessage
+=== RUN   TestFindLatestUserMessage/no_floor_picks_the_last_user_message
+=== RUN   TestFindLatestUserMessage/floor_at_the_target_keeps_it_eligible
+=== RUN   TestFindLatestUserMessage/floor_above_the_last_user_message_finds_none
+=== RUN   TestFindLatestUserMessage/floor_beyond_the_array_finds_none
+--- PASS: TestFindLatestUserMessage (0.00s)
+    --- PASS: TestFindLatestUserMessage/no_floor_picks_the_last_user_message (0.00s)
+    --- PASS: TestFindLatestUserMessage/floor_at_the_target_keeps_it_eligible (0.00s)
+    --- PASS: TestFindLatestUserMessage/floor_above_the_last_user_message_finds_none (0.00s)
+    --- PASS: TestFindLatestUserMessage/floor_beyond_the_array_finds_none (0.00s)
+=== RUN   TestFindLatestUserMessageNoUserRole
+--- PASS: TestFindLatestUserMessageNoUserRole (0.00s)
+=== RUN   TestPlanSlotRangesSliceBackExactly
+--- PASS: TestPlanSlotRangesSliceBackExactly (0.00s)
+=== RUN   TestPlanBlocksClassifiesTypes
+--- PASS: TestPlanBlocksClassifiesTypes (0.00s)
+=== RUN   TestPlanBlocksThresholdBoundary
+--- PASS: TestPlanBlocksThresholdBoundary (0.00s)
+=== RUN   TestPlanBlocksStringContent
+--- PASS: TestPlanBlocksStringContent (0.00s)
+=== RUN   TestPlanBlocksSkipsStructuredToolResult
+--- PASS: TestPlanBlocksSkipsStructuredToolResult (0.00s)
+=== RUN   TestPlanBlocksEscapedTextRangeCoversRawForm
+--- PASS: TestPlanBlocksEscapedTextRangeCoversRawForm (0.00s)
+=== RUN   TestPlanBlocksEmptyAndMissingContent
+=== RUN   TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user"}]}
+=== RUN   TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":[]}]}
+=== RUN   TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":null}]}
+=== RUN   TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":123}]}
+--- PASS: TestPlanBlocksEmptyAndMissingContent (0.00s)
+    --- PASS: TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user"}]} (0.00s)
+    --- PASS: TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":[]}]} (0.00s)
+    --- PASS: TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":null}]} (0.00s)
+    --- PASS: TestPlanBlocksEmptyAndMissingContent/{"messages":[{"role":"user","content":123}]} (0.00s)
+=== RUN   TestPlanBlocksOutOfRangeMessageIndex
+--- PASS: TestPlanBlocksOutOfRangeMessageIndex (0.00s)
+=== RUN   TestStringSlotRejectsUnknownOffset
+=== RUN   TestStringSlotRejectsUnknownOffset/unknown_offset_is_dropped
+=== RUN   TestStringSlotRejectsUnknownOffset/non_string_is_dropped
+=== RUN   TestStringSlotRejectsUnknownOffset/located_string_is_kept
+--- PASS: TestStringSlotRejectsUnknownOffset (0.00s)
+    --- PASS: TestStringSlotRejectsUnknownOffset/unknown_offset_is_dropped (0.00s)
+    --- PASS: TestStringSlotRejectsUnknownOffset/non_string_is_dropped (0.00s)
+    --- PASS: TestStringSlotRejectsUnknownOffset/located_string_is_kept (0.00s)
+=== RUN   TestPlanBlocksStringContentBelowThreshold
+--- PASS: TestPlanBlocksStringContentBelowThreshold (0.00s)
+=== RUN   TestPlanBlocksThresholdMeasuresDecodedText
+--- PASS: TestPlanBlocksThresholdMeasuresDecodedText (0.00s)
+=== RUN   TestReplayKeepsTheCachedPrefixByteIdenticalAcrossTurns
+--- PASS: TestReplayKeepsTheCachedPrefixByteIdenticalAcrossTurns (0.00s)
+=== RUN   TestWithoutReplayTheSecondTurnRewritesTheCachedPrefix
+--- PASS: TestWithoutReplayTheSecondTurnRewritesTheCachedPrefix (0.00s)
+=== RUN   TestReplayRewritesBelowTheFrozenFloor
+--- PASS: TestReplayRewritesBelowTheFrozenFloor (0.00s)
+=== RUN   TestReplayedBlockOutcomeNamesItsBranchAndItsKey
+--- PASS: TestReplayedBlockOutcomeNamesItsBranchAndItsKey (0.00s)
+=== RUN   TestReplayRefreshesTheStoreEntryBehindTheMarkerOnTheWire
+--- PASS: TestReplayRefreshesTheStoreEntryBehindTheMarkerOnTheWire (0.00s)
+=== RUN   TestReplayedBodyMarkersResolve
+--- PASS: TestReplayedBodyMarkersResolve (0.00s)
+=== RUN   TestAReplayedBlockInTheLiveZoneIsNotCompressedTwice
+--- PASS: TestAReplayedBlockInTheLiveZoneIsNotCompressedTwice (0.00s)
+=== RUN   TestReplayNeverSplicesASlotWithNoByteRange
+--- PASS: TestReplayNeverSplicesASlotWithNoByteRange (0.00s)
+=== RUN   TestReplayRefreshesOnlyTheEntriesTheWireNames
+--- PASS: TestReplayRefreshesOnlyTheEntriesTheWireNames (0.00s)
+=== RUN   TestDispatchPreservesUntouchedRanges
+=== RUN   TestDispatchPreservesUntouchedRanges/numeric_formatting
+=== RUN   TestDispatchPreservesUntouchedRanges/unicode_and_escapes
+=== RUN   TestDispatchPreservesUntouchedRanges/html_chars_that_Marshal_would_escape
+=== RUN   TestDispatchPreservesUntouchedRanges/hot_zone_blocks_only
+=== RUN   TestDispatchPreservesUntouchedRanges/with_system_and_tools
+=== RUN   TestDispatchPreservesUntouchedRanges/empty_messages
+=== RUN   TestDispatchPreservesUntouchedRanges/minimal
+=== RUN   TestDispatchPreservesUntouchedRanges/non_alphabetical_key_order
+=== RUN   TestDispatchPreservesUntouchedRanges/block_content
+=== RUN   TestDispatchPreservesUntouchedRanges/multi_turn_with_markers
+=== RUN   TestDispatchPreservesUntouchedRanges/trailing_newline
+=== RUN   TestDispatchPreservesUntouchedRanges/irregular_whitespace
+--- PASS: TestDispatchPreservesUntouchedRanges (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/numeric_formatting (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/unicode_and_escapes (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/html_chars_that_Marshal_would_escape (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/hot_zone_blocks_only (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/with_system_and_tools (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/empty_messages (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/minimal (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/non_alphabetical_key_order (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/block_content (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/multi_turn_with_markers (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/trailing_newline (0.00s)
+    --- PASS: TestDispatchPreservesUntouchedRanges/irregular_whitespace (0.00s)
+=== RUN   TestDispatchWithoutRouterIsByteIdentical
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/numeric_formatting
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/unicode_and_escapes
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/block_content
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/with_system_and_tools
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/multi_turn_with_markers
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/trailing_newline
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/minimal
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/irregular_whitespace
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/non_alphabetical_key_order
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/html_chars_that_Marshal_would_escape
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/hot_zone_blocks_only
+=== RUN   TestDispatchWithoutRouterIsByteIdentical/empty_messages
+--- PASS: TestDispatchWithoutRouterIsByteIdentical (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/numeric_formatting (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/unicode_and_escapes (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/block_content (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/with_system_and_tools (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/multi_turn_with_markers (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/trailing_newline (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/minimal (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/irregular_whitespace (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/non_alphabetical_key_order (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/html_chars_that_Marshal_would_escape (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/hot_zone_blocks_only (0.00s)
+    --- PASS: TestDispatchWithoutRouterIsByteIdentical/empty_messages (0.00s)
+=== RUN   TestDispatchNeverReturnsNilBody
+=== RUN   TestDispatchNeverReturnsNilBody/#00
+=== RUN   TestDispatchNeverReturnsNilBody/#01
+=== RUN   TestDispatchNeverReturnsNilBody/{not_json
+=== RUN   TestDispatchNeverReturnsNilBody/null
+=== RUN   TestDispatchNeverReturnsNilBody/[]
+=== RUN   TestDispatchNeverReturnsNilBody/{"messages":"oops"}
+=== RUN   TestDispatchNeverReturnsNilBody/{"model":"claude-3"}
+--- PASS: TestDispatchNeverReturnsNilBody (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/#00 (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/#01 (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/{not_json (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/null (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/[] (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/{"messages":"oops"} (0.00s)
+    --- PASS: TestDispatchNeverReturnsNilBody/{"model":"claude-3"} (0.00s)
+=== RUN   TestDispatchReasonsOnBadInput
+=== RUN   TestDispatchReasonsOnBadInput/{not_json
+=== RUN   TestDispatchReasonsOnBadInput/null
+=== RUN   TestDispatchReasonsOnBadInput/[]
+=== RUN   TestDispatchReasonsOnBadInput/{"model":"claude-3"}
+=== RUN   TestDispatchReasonsOnBadInput/{"messages":"oops"}
+=== RUN   TestDispatchReasonsOnBadInput/{"messages":[]}
+--- PASS: TestDispatchReasonsOnBadInput (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/{not_json (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/null (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/[] (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/{"model":"claude-3"} (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/{"messages":"oops"} (0.00s)
+    --- PASS: TestDispatchReasonsOnBadInput/{"messages":[]} (0.00s)
+=== RUN   TestReasonWireValues
+--- PASS: TestReasonWireValues (0.00s)
+=== RUN   TestDispatchFrozenCount
+--- PASS: TestDispatchFrozenCount (0.00s)
+=== RUN   TestDispatchHonoursFrozenFloor
+--- PASS: TestDispatchHonoursFrozenFloor (0.00s)
+=== RUN   TestApplyReplacementsSingle
+--- PASS: TestApplyReplacementsSingle (0.00s)
+=== RUN   TestApplyReplacementsSortsByStart
+--- PASS: TestApplyReplacementsSortsByStart (0.00s)
+=== RUN   TestApplyReplacementsPreservesGapsVerbatim
+--- PASS: TestApplyReplacementsPreservesGapsVerbatim (0.00s)
+=== RUN   TestApplyReplacementsEmpty
+--- PASS: TestApplyReplacementsEmpty (0.00s)
+=== RUN   TestApplyReplacementsDropsOverlaps
+--- PASS: TestApplyReplacementsDropsOverlaps (0.00s)
+=== RUN   TestApplyReplacementsAtBoundaries
+--- PASS: TestApplyReplacementsAtBoundaries (0.00s)
+=== RUN   TestEncodeJSONString
+=== RUN   TestEncodeJSONString/plain
+=== RUN   TestEncodeJSONString/with_"quotes"
+=== RUN   TestEncodeJSONString/with_\_backslash
+=== RUN   TestEncodeJSONString/with_newline_tab
+=== RUN   TestEncodeJSONString/café_—_unicode_✓
+=== RUN   TestEncodeJSONString/#00
+=== RUN   TestEncodeJSONString/a_<_b_&&_c_>_d
+=== RUN   TestEncodeJSONString/\x00\x01_control_chars
+--- PASS: TestEncodeJSONString (0.00s)
+    --- PASS: TestEncodeJSONString/plain (0.00s)
+    --- PASS: TestEncodeJSONString/with_"quotes" (0.00s)
+    --- PASS: TestEncodeJSONString/with_\_backslash (0.00s)
+    --- PASS: TestEncodeJSONString/with_newline_tab (0.00s)
+    --- PASS: TestEncodeJSONString/café_—_unicode_✓ (0.00s)
+    --- PASS: TestEncodeJSONString/#00 (0.00s)
+    --- PASS: TestEncodeJSONString/a_<_b_&&_c_>_d (0.00s)
+    --- PASS: TestEncodeJSONString/\x00\x01_control_chars (0.00s)
+=== RUN   TestEncodeJSONStringDoesNotEscapeHTML
+--- PASS: TestEncodeJSONStringDoesNotEscapeHTML (0.00s)
+=== RUN   TestEncodeJSONStringIsDeterministic
+--- PASS: TestEncodeJSONStringIsDeterministic (0.00s)
+=== RUN   TestApplyReplacementsRangesAreInputOffsets
+--- PASS: TestApplyReplacementsRangesAreInputOffsets (0.00s)
+=== RUN   TestApplyReplacementsDropsOutOfBounds
+--- PASS: TestApplyReplacementsDropsOutOfBounds (0.00s)
+PASS
+ok  	github.com/dobbo-ca/headroom-go/internal/livezone	0.571s
+=== RUN   TestEnginesDeterministic
+--- PASS: TestEnginesDeterministic (0.00s)
+=== RUN   TestDiffShortInputPassThrough
+--- PASS: TestDiffShortInputPassThrough (0.00s)
+=== RUN   TestDiffCompressesManyHunksAndStoresOriginal
+--- PASS: TestDiffCompressesManyHunksAndStoresOriginal (0.00s)
+=== RUN   TestSplitLinesRust
+--- PASS: TestSplitLinesRust (0.00s)
+=== RUN   TestASCIILower
+--- PASS: TestASCIILower (0.00s)
+=== RUN   TestLogCompressorDropsLowValueAndStoresOriginal
+--- PASS: TestLogCompressorDropsLowValueAndStoresOriginal (0.00s)
+=== RUN   TestLogCompressorShortInputNoCCR
+--- PASS: TestLogCompressorShortInputNoCCR (0.00s)
+=== RUN   TestLogCompressorWordBoundaryLevel
+--- PASS: TestLogCompressorWordBoundaryLevel (0.00s)
+=== RUN   TestLogCompressorRatioGate
+--- PASS: TestLogCompressorRatioGate (0.00s)
+=== RUN   TestLogCompressorDeterministicAtCap
+--- PASS: TestLogCompressorDeterministicAtCap (0.01s)
+=== RUN   TestLogCompressorWarningDedup
+--- PASS: TestLogCompressorWarningDedup (0.00s)
+=== RUN   TestSearchParseWindowsDriveGuard
+--- PASS: TestSearchParseWindowsDriveGuard (0.00s)
+=== RUN   TestSearchCompressesClusteredMatches
+--- PASS: TestSearchCompressesClusteredMatches (0.00s)
+=== RUN   TestSearchEmptyPassThrough
+--- PASS: TestSearchEmptyPassThrough (0.00s)
+PASS
+ok  	github.com/dobbo-ca/headroom-go/internal/compress	0.189s
+=== RUN   TestDiffNoiseDropsLockfileHunk
+--- PASS: TestDiffNoiseDropsLockfileHunk (0.00s)
+=== RUN   TestDiffNoiseDropsWhitespaceOnlyHunk
+--- PASS: TestDiffNoiseDropsWhitespaceOnlyHunk (0.00s)
+=== RUN   TestDiffNoisePureContextHunkNotWhitespaceOnly
+--- PASS: TestDiffNoisePureContextHunkNotWhitespaceOnly (0.00s)
+=== RUN   TestIsLockfilePathBoundary
+--- PASS: TestIsLockfilePathBoundary (0.00s)
+=== RUN   TestDiffNoiseEmptyBloatZero
+--- PASS: TestDiffNoiseEmptyBloatZero (0.00s)
+=== RUN   TestDiffNoiseNoSectionsSkipped
+--- PASS: TestDiffNoiseNoSectionsSkipped (0.00s)
+=== RUN   TestDiffOffloadEmptyBloatZero
+--- PASS: TestDiffOffloadEmptyBloatZero (0.00s)
+=== RUN   TestDiffOffloadConfidence
+--- PASS: TestDiffOffloadConfidence (0.00s)
+=== RUN   TestDiffOffloadShortInputSkips
+--- PASS: TestDiffOffloadShortInputSkips (0.00s)
+=== RUN   TestDiffOffloadContextHeavyBloat
+--- PASS: TestDiffOffloadContextHeavyBloat (0.00s)
+=== RUN   TestJsonOffloadEmptyBloatZero
+--- PASS: TestJsonOffloadEmptyBloatZero (0.00s)
+=== RUN   TestJsonOffloadConfidence
+--- PASS: TestJsonOffloadConfidence (0.00s)
+=== RUN   TestJsonOffloadNonArrayBloatZero
+--- PASS: TestJsonOffloadNonArrayBloatZero (0.00s)
+=== RUN   TestJsonOffloadArrayBloat
+--- PASS: TestJsonOffloadArrayBloat (0.00s)
+=== RUN   TestJsonOffloadPassthroughSkips
+--- PASS: TestJsonOffloadPassthroughSkips (0.00s)
+=== RUN   TestJsonOffloadAppliesTo
+--- PASS: TestJsonOffloadAppliesTo (0.00s)
+=== RUN   TestJsonOffloadBloatUnicodeTrim
+--- PASS: TestJsonOffloadBloatUnicodeTrim (0.00s)
+=== RUN   TestLogOffloadEmptyBloatZero
+--- PASS: TestLogOffloadEmptyBloatZero (0.00s)
+=== RUN   TestLogOffloadConfidence
+--- PASS: TestLogOffloadConfidence (0.00s)
+=== RUN   TestLogOffloadShortInputSkips
+--- PASS: TestLogOffloadShortInputSkips (0.00s)
+=== RUN   TestLogOffloadAppliesTo
+--- PASS: TestLogOffloadAppliesTo (0.00s)
+=== RUN   TestSearchOffloadEmptyBloatZero
+--- PASS: TestSearchOffloadEmptyBloatZero (0.00s)
+=== RUN   TestSearchOffloadConfidence
+--- PASS: TestSearchOffloadConfidence (0.00s)
+=== RUN   TestSearchOffloadAppliesTo
+--- PASS: TestSearchOffloadAppliesTo (0.00s)
+=== RUN   TestSearchOffloadClusteredBloat
+--- PASS: TestSearchOffloadClusteredBloat (0.00s)
+=== RUN   TestSearchOffloadName
+--- PASS: TestSearchOffloadName (0.00s)
+=== RUN   TestJsonOffloadSmartCrusherCompresses
+--- PASS: TestJsonOffloadSmartCrusherCompresses (0.00s)
+=== RUN   TestJsonOffloadSmartCrusherShortArraySkips
+--- PASS: TestJsonOffloadSmartCrusherShortArraySkips (0.00s)
+=== RUN   TestJsonOffloadSmartCrusherEmptyArraySkips
+--- PASS: TestJsonOffloadSmartCrusherEmptyArraySkips (0.00s)
+=== RUN   TestJsonOffloadSmartCrusherAnchorSurvives
+--- PASS: TestJsonOffloadSmartCrusherAnchorSurvives (0.00s)
+=== RUN   TestJsonOffloadSmartCrusherConstructsWithoutPanic
+--- PASS: TestJsonOffloadSmartCrusherConstructsWithoutPanic (0.00s)
+PASS
+ok  	github.com/dobbo-ca/headroom-go/internal/offloads	0.538s=== RUN   TestProtectRestoreRoundTripCustomBlock
+--- PASS: TestProtectRestoreRoundTripCustomBlock (0.00s)
+=== RUN   TestHTMLTagsNotProtected
+--- PASS: TestHTMLTagsNotProtected (0.00s)
+=== RUN   TestCommentsAndDoctypeVerbatim
+--- PASS: TestCommentsAndDoctypeVerbatim (0.00s)
+=== RUN   TestCollisionAvoidance
+--- PASS: TestCollisionAvoidance (0.00s)
+=== RUN   TestEarlyReturnNoAngleBracket
+--- PASS: TestEarlyReturnNoAngleBracket (0.00s)
+=== RUN   TestEmptyInput
+--- PASS: TestEmptyInput (0.00s)
+=== RUN   TestSelfClosingCustomProtected
+--- PASS: TestSelfClosingCustomProtected (0.00s)
+=== RUN   TestOrphanCloseEmittedVerbatim
+--- PASS: TestOrphanCloseEmittedVerbatim (0.00s)
+=== RUN   TestMarkerModeProtectsOpenAndClose
+--- PASS: TestMarkerModeProtectsOpenAndClose (0.00s)
+=== RUN   TestNestedBlockCollapsesToOuter
+--- PASS: TestNestedBlockCollapsesToOuter (0.00s)
+=== RUN   TestIsKnownHTMLTagCaseInsensitive
+--- PASS: TestIsKnownHTMLTagCaseInsensitive (0.00s)
+=== RUN   TestRestoreMissingPlaceholderSkipped
+2026/08/25 23:25:30 ERROR tagprotect: placeholder missing during restore placeholder={{HEADROOM_TAG_0}}
+--- PASS: TestRestoreMissingPlaceholderSkipped (0.00s)
+=== RUN   TestDeliberateFailureForDiagnosis
+    tagprotect_test.go:145: deliberate failure 0: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 1: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 2: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 3: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 4: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 5: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 6: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 7: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 8: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 9: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 10: expected 42, got 41
+    tagprotect_test.go:145: deliberate failure 11: expected 42, got 41
+--- FAIL: TestDeliberateFailureForDiagnosis (0.00s)
+FAIL
+FAIL	github.com/dobbo-ca/headroom-go/internal/tagprotect	0.414s
+=== RUN   TestHotZoneExactList
+--- PASS: TestHotZoneExactList (0.00s)
+=== RUN   TestIsHotZoneExactMatchOnly
+--- PASS: TestIsHotZoneExactMatchOnly (0.00s)
+=== RUN   TestInnerContentField
+--- PASS: TestInnerContentField (0.00s)
+PASS
+ok  	github.com/dobbo-ca/headroom-go/internal/toolpairs	0.228s
+=== RUN   TestHomeUsesHeadroomHomeOverride
+--- PASS: TestHomeUsesHeadroomHomeOverride (0.00s)
+=== RUN   TestHomeDefaultsToDotHeadroomUnderUserHome
+--- PASS: TestHomeDefaultsToDotHeadroomUnderUserHome (0.00s)
+=== RUN   TestLayoutPathsHangOffHome
+--- PASS: TestLayoutPathsHangOffHome (0.00s)
+=== RUN   TestEnsureDirCreatesNestedDirAndIsIdempotent
+--- PASS: TestEnsureDirCreatesNestedDirAndIsIdempotent (0.00s)
+PASS
+ok  	github.com/dobbo-ca/headroom-go/internal/paths	0.614s
+FAIL
