@@ -150,7 +150,10 @@ func planBlocks(body string, msgIdx int) []planSlot {
 				toolUseID := block.Get("tool_use_id").String()
 				for j, elem := range inner.Array() {
 					elemType := elem.Get("type").String()
-					if isHotZone(elemType) {
+					// Nested cache_control markers are hot-zone: the frozen floor
+					// computation only walks top-level content, but a nested marker
+					// must be treated as frozen to preserve the cache key.
+					if elem.Get("cache_control").Exists() || isHotZone(elemType) {
 						slots = append(slots, planSlot{
 							blockIndex:   i,
 							kind:         slotHotZone,
@@ -180,6 +183,16 @@ func planBlocks(body string, msgIdx int) []planSlot {
 					r := gjson.Get(body, nestedField)
 					start, end, text, ok := stringSlot(r)
 					if !ok {
+						// Missing or non-string field: record as unreachable
+						// so the harness can distinguish "saw it, no valid field"
+						// from "block was not scanned at all".
+						slots = append(slots, planSlot{
+							blockIndex:   i,
+							kind:         slotUnreachable,
+							blockType:    elemType,
+							toolUseID:    toolUseID,
+							contentIndex: j,
+						})
 						continue
 					}
 					kind := slotCompressible
@@ -204,6 +217,8 @@ func planBlocks(body string, msgIdx int) []planSlot {
 		r := gjson.Get(body, fmt.Sprintf("messages.%d.content.%d.%s", msgIdx, i, field))
 		start, end, text, ok := stringSlot(r)
 		if !ok {
+			// Missing or non-string field
+			slots = append(slots, planSlot{blockIndex: i, kind: slotUnreachable, blockType: blockType, contentIndex: -1})
 			continue
 		}
 		kind := slotCompressible

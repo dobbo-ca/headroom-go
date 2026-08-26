@@ -225,7 +225,7 @@ func TestPlanBlocksNestedToolUseIDIsInherited(t *testing.T) {
 }
 
 // TestPlanBlocksImageSlotSkipsNonBase64Source asserts source.type "url" or
-// "file" produces no slot (no source.data field exists).
+// "file" produces a slotUnreachable (no source.data field exists).
 func TestPlanBlocksImageSlotSkipsNonBase64Source(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -239,9 +239,12 @@ func TestPlanBlocksImageSlotSkipsNonBase64Source(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			body := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":` + tt.sourceType + `}}]}]}]}`
 			slots := planBlocks(body, 0)
-			// An image without source.data produces no slot
-			if len(slots) != 0 {
-				t.Errorf("got %d slots, want 0 (no source.data)", len(slots))
+			// An image without source.data is unreachable, not omitted
+			if len(slots) != 1 {
+				t.Fatalf("got %d slots, want 1", len(slots))
+			}
+			if slots[0].kind != slotUnreachable {
+				t.Errorf("slot kind = %v, want slotUnreachable", slots[0].kind)
 			}
 		})
 	}

@@ -11,6 +11,8 @@
 package livezone
 
 import (
+	"fmt"
+
 	"github.com/dobbo-ca/headroom-go/internal/cachecontrol"
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
@@ -102,6 +104,9 @@ type Options struct {
 	//
 	// Nil disables replay and Dispatch behaves as it did before.
 	Replay *cachestab.SessionReplay
+	// ImageFit downsamples oversized images to the standard vision tier.
+	// False by default: screenshot-understanding needs the fidelity.
+	ImageFit bool
 }
 
 // BlockOutcome records what happened to one content block.
@@ -245,8 +250,49 @@ func Dispatch(body []byte, opts Options) Result {
 				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "unreachable", ContentIndex: s.contentIndex})
 			continue
 		case slotImage:
+			if !opts.ImageFit {
+				outcomes = append(outcomes, BlockOutcome{
+					MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
+				continue
+			}
+			// Extract media type from the same path used to locate the data field
+			var mediaTypeField string
+			if s.contentIndex >= 0 {
+				// Nested image
+				mediaTypeField = fmt.Sprintf("messages.%d.content.%d.content.%d.source.media_type", msgIdx, s.blockIndex, s.contentIndex)
+			} else {
+				// Top-level image
+				mediaTypeField = fmt.Sprintf("messages.%d.content.%d.source.media_type", msgIdx, s.blockIndex)
+			}
+			mediaType := gjson.Get(bodyStr, mediaTypeField).String()
+
+			newB64, tokBefore, tokAfter, ok := fitImage(s.text, mediaType)
+			if !ok {
+				outcomes = append(outcomes, BlockOutcome{
+					MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
+				continue
+			}
+
+			// Image resize succeeded
 			outcomes = append(outcomes, BlockOutcome{
-				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
+				MessageIndex: msgIdx,
+				Index:        s.blockIndex,
+				BlockType:    s.blockType,
+				Action:       "image_resized",
+				TokensBefore: tokBefore,
+				TokensAfter:  tokAfter,
+				ContentIndex: s.contentIndex,
+			})
+
+			// Record for replay
+			if opts.Replay != nil {
+				opts.Replay.Record(imageReplayKey(mediaType, s.text), newB64)
+			}
+
+			reps = append(reps, replacement{
+				start: s.start, end: s.end, repl: encodeJSONString(newB64)})
+			before += tokBefore
+			after += tokAfter
 			continue
 		}
 

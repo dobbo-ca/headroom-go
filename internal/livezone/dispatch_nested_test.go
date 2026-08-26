@@ -1,7 +1,9 @@
 package livezone
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"image"
 	"strings"
 	"testing"
 
@@ -22,6 +24,22 @@ func bodyWithToolResultArray(textContent, b64Data string) []byte {
 	b.WriteString(`}},{"type":"text","text":`)
 	b.Write(textQuoted)
 	b.WriteString(`}]}]}]}`)
+	return []byte(b.String())
+}
+
+// bodyWithToolResultArrayImage builds a tool_result with a single image in array content.
+func bodyWithToolResultArrayImage(b64Data, mediaType string) []byte {
+	b64Quoted, _ := json.Marshal(b64Data)
+	mtQuoted, _ := json.Marshal(mediaType)
+	var b strings.Builder
+	b.WriteString(`{"model":"claude-3-5-sonnet-20241022","messages":[`)
+	b.WriteString(`{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"bash","input":{"command":"echo test"}}]},`)
+	b.WriteString(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":[`)
+	b.WriteString(`{"type":"image","source":{"type":"base64","media_type":`)
+	b.Write(mtQuoted)
+	b.WriteString(`,"data":`)
+	b.Write(b64Quoted)
+	b.WriteString(`}}]}]}]}`)
 	return []byte(b.String())
 }
 
@@ -291,4 +309,99 @@ func TestDispatchIsDeterministicWithNestedBlocks(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestDispatchImageFitOffLeavesImageBytesUntouched proves ImageFit=false
+// keeps images byte-identical.
+func TestDispatchImageFitOffLeavesImageBytesUntouched(t *testing.T) {
+	b64 := genPNG(2558, 1370)
+	body := bodyWithToolResultArrayImage(b64, "image/png")
+
+	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 10})
+	if err != nil {
+		t.Fatalf("ccr.FromConfig: %v", err)
+	}
+	opts := Options{Store: store, FrozenCount: -1, ImageFit: false}
+
+	res := Dispatch(body, opts)
+
+	// Must see the image block
+	if len(res.Blocks) != 1 {
+		t.Fatalf("len(Blocks) = %d, want 1", len(res.Blocks))
+	}
+	if res.Blocks[0].Action != "image_declined" {
+		t.Errorf("Action = %q, want %q", res.Blocks[0].Action, "image_declined")
+	}
+	// Body must be byte-identical
+	if string(res.Body) != string(body) {
+		t.Error("body changed when ImageFit=false")
+	}
+}
+
+// TestDispatchImageFitOnResizesAndReportsTokens proves ImageFit=true
+// transforms the image and reports visual tokens.
+func TestDispatchImageFitOnResizesAndReportsTokens(t *testing.T) {
+	b64 := genPNG(2558, 1370)
+	body := bodyWithToolResultArrayImage(b64, "image/png")
+
+	store, err := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 10})
+	if err != nil {
+		t.Fatalf("ccr.FromConfig: %v", err)
+	}
+	opts := Options{Store: store, FrozenCount: -1, ImageFit: true}
+
+	res := Dispatch(body, opts)
+
+	// Must see the image block
+	if len(res.Blocks) != 1 {
+		t.Fatalf("len(Blocks) = %d, want 1", len(res.Blocks))
+	}
+	blk := res.Blocks[0]
+	if blk.Action != "image_resized" {
+		t.Errorf("Action = %q, want %q", blk.Action, "image_resized")
+	}
+	// Token counts must be non-zero and decreasing
+	if blk.TokensBefore == 0 || blk.TokensAfter == 0 {
+		t.Errorf("tokens before/after = %d/%d, want non-zero", blk.TokensBefore, blk.TokensAfter)
+	}
+	if blk.TokensAfter >= blk.TokensBefore {
+		t.Errorf("tokens %d→%d, want after < before", blk.TokensBefore, blk.TokensAfter)
+	}
+	// Expected for 2558x1370: 4508 → 1566
+	if blk.TokensBefore != 4508 || blk.TokensAfter != 1566 {
+		t.Errorf("tokens = %d→%d, want 4508→1566", blk.TokensBefore, blk.TokensAfter)
+	}
+	// Body must be valid JSON
+	if !gjson.ValidBytes(res.Body) {
+		t.Error("output is not valid JSON")
+	}
+	// media_type must be unchanged
+	mt := gjson.GetBytes(res.Body, "messages.1.content.0.content.0.source.media_type").String()
+	if mt != "image/png" {
+		t.Errorf("media_type = %q, want %q", mt, "image/png")
+	}
+	// data field must be different (resized)
+	newData := gjson.GetBytes(res.Body, "messages.1.content.0.content.0.source.data").String()
+	if newData == b64 {
+		t.Error("image data unchanged when ImageFit=true")
+	}
+	// The new data must decode to the target size
+	if newData != "" {
+		tw, th := resizedSize(2558, 1370, 1568, 1568)
+		cfg, _, err := image.DecodeConfig(strings.NewReader(mustDecodeB64(newData)))
+		if err != nil {
+			t.Fatalf("decode resized image: %v", err)
+		}
+		if cfg.Width != tw || cfg.Height != th {
+			t.Errorf("resized dimensions = %dx%d, want %dx%d", cfg.Width, cfg.Height, tw, th)
+		}
+	}
+}
+
+func mustDecodeB64(s string) string {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
 }

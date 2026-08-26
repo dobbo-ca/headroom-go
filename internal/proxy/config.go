@@ -52,6 +52,11 @@ type Config struct {
 	//  3. Entries are swept once the client stops re-sending their block,
 	//     so a proxy running for days holds the working set, not the day.
 	Replay bool
+	// ImageFit downsamples oversized images to the standard vision tier
+	// (1568px long edge, 1568 visual tokens). OFF by default: computer-use
+	// and screenshot-understanding are exactly the workloads that need
+	// fidelity. Measure before enabling.
+	ImageFit bool
 }
 
 // Overrides carries command-line values; empty means unset.
@@ -63,6 +68,10 @@ type Overrides struct {
 // offValues disable a boolean setting. Same vocabulary the rest of the
 // project uses, so operators do not need a second one.
 var offValues = map[string]bool{"disabled": true, "off": true, "false": true, "0": true, "no": true}
+
+// onValues enable a boolean setting that defaults OFF. Mirrors offValues so
+// operators do not need a third vocabulary.
+var onValues = map[string]bool{"enabled": true, "on": true, "true": true, "1": true, "yes": true}
 
 // Load resolves the proxy configuration with flag > env > default precedence.
 func Load(ov Overrides) (Config, error) {
@@ -100,6 +109,7 @@ func Load(ov Overrides) (Config, error) {
 
 	c.Compress = !offValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_COMPRESS")))]
 	c.Replay = !offValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_REPLAY")))]
+	c.ImageFit = onValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_IMAGE_FIT")))]
 	return c, nil
 }
 
