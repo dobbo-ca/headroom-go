@@ -107,6 +107,7 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 		Tokenizer:   s.deps.Tokenizer,
 		FrozenCount: frozen,
 		Replay:      replay,
+		ImageFit:    s.deps.Config.ImageFit,
 	})
 	slog.Debug("live-zone dispatch",
 		"path", r.URL.Path, "auth_mode", mode.String(), "applied", res.Applied,

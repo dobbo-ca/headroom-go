@@ -20,6 +20,14 @@ const (
 	slotHotZone
 	// slotBelowThreshold is a candidate too short to be worth compressing.
 	slotBelowThreshold
+	// slotImage is an image block's base64 payload. Never routed through the
+	// compressors: the router would classify base64 as PlainText and hand it to
+	// TextOffload.
+	slotImage
+	// slotUnreachable is a block or array element whose type the dispatcher has
+	// no compressible field for. Recorded so a harness can tell "I saw this and
+	// could not act on it" from "there was nothing here".
+	slotUnreachable
 )
 
 // planSlot is one block's plan entry. start and end bracket the JSON string
@@ -37,6 +45,11 @@ type planSlot struct {
 	// whole-body index to learn the PRODUCING TOOL, which is the only way a
 	// transform can tell raw file content from derived output.
 	toolUseID string
+	// contentIndex is the slot's index inside a tool_result's structured content
+	// array, or -1 when the slot is not nested. blockIndex stays the index of the
+	// block in the MESSAGE's content array either way, so a nested slot needs both
+	// numbers to be identified.
+	contentIndex int
 }
 
 // isHotZone reports whether a block type is cache-hot.
@@ -83,12 +96,13 @@ func classify(blockIndex int, blockType string, start, end int, text string, bas
 		kind = slotBelowThreshold
 	}
 	return planSlot{
-		blockIndex: blockIndex,
-		kind:       kind,
-		blockType:  blockType,
-		text:       text,
-		start:      start,
-		end:        end,
+		blockIndex:   blockIndex,
+		kind:         kind,
+		blockType:    blockType,
+		text:         text,
+		start:        start,
+		end:          end,
+		contentIndex: -1,
 	}
 }
 
@@ -118,7 +132,7 @@ func planBlocks(body string, msgIdx int) []planSlot {
 		blockType := block.Get("type").String()
 
 		if isHotZone(blockType) {
-			slots = append(slots, planSlot{blockIndex: i, kind: slotHotZone, blockType: blockType})
+			slots = append(slots, planSlot{blockIndex: i, kind: slotHotZone, blockType: blockType, contentIndex: -1})
 			continue
 		}
 
@@ -126,20 +140,92 @@ func planBlocks(body string, msgIdx int) []planSlot {
 		switch blockType {
 		case "text":
 			field = "text"
+		case "image":
+			field = "source.data"
 		case "tool_result":
-			// Only a JSON-string content is supported; a structured array
-			// content is skipped rather than mangled.
+			// Check if content is a structured array
+			inner := gjson.Get(body, fmt.Sprintf("messages.%d.content.%d.content", msgIdx, i))
+			if inner.IsArray() {
+				// Walk the nested array
+				toolUseID := block.Get("tool_use_id").String()
+				for j, elem := range inner.Array() {
+					elemType := elem.Get("type").String()
+					// Nested cache_control markers are hot-zone: the frozen floor
+					// computation only walks top-level content, but a nested marker
+					// must be treated as frozen to preserve the cache key.
+					if elem.Get("cache_control").Exists() || isHotZone(elemType) {
+						slots = append(slots, planSlot{
+							blockIndex:   i,
+							kind:         slotHotZone,
+							blockType:    elemType,
+							toolUseID:    toolUseID,
+							contentIndex: j,
+						})
+						continue
+					}
+					var nestedField string
+					switch elemType {
+					case "text":
+						nestedField = fmt.Sprintf("messages.%d.content.%d.content.%d.text", msgIdx, i, j)
+					case "image":
+						nestedField = fmt.Sprintf("messages.%d.content.%d.content.%d.source.data", msgIdx, i, j)
+					default:
+						// Unrecognized nested type
+						slots = append(slots, planSlot{
+							blockIndex:   i,
+							kind:         slotUnreachable,
+							blockType:    elemType,
+							toolUseID:    toolUseID,
+							contentIndex: j,
+						})
+						continue
+					}
+					r := gjson.Get(body, nestedField)
+					start, end, text, ok := stringSlot(r)
+					if !ok {
+						// Missing or non-string field: record as unreachable
+						// so the harness can distinguish "saw it, no valid field"
+						// from "block was not scanned at all".
+						slots = append(slots, planSlot{
+							blockIndex:   i,
+							kind:         slotUnreachable,
+							blockType:    elemType,
+							toolUseID:    toolUseID,
+							contentIndex: j,
+						})
+						continue
+					}
+					kind := slotCompressible
+					if elemType == "image" {
+						kind = slotImage
+					}
+					slot := classify(i, elemType, start, end, text, kind)
+					slot.toolUseID = toolUseID
+					slot.contentIndex = j
+					slots = append(slots, slot)
+				}
+				continue
+			}
+			// String content
 			field = "content"
 		default:
+			// Unrecognized top-level type
+			slots = append(slots, planSlot{blockIndex: i, kind: slotUnreachable, blockType: blockType, contentIndex: -1})
 			continue
 		}
 
 		r := gjson.Get(body, fmt.Sprintf("messages.%d.content.%d.%s", msgIdx, i, field))
 		start, end, text, ok := stringSlot(r)
 		if !ok {
+			// Missing or non-string field
+			slots = append(slots, planSlot{blockIndex: i, kind: slotUnreachable, blockType: blockType, contentIndex: -1})
 			continue
 		}
-		slot := classify(i, blockType, start, end, text, slotCompressible)
+		kind := slotCompressible
+		if blockType == "image" {
+			kind = slotImage
+		}
+		slot := classify(i, blockType, start, end, text, kind)
 		if blockType == "tool_result" {
 			slot.toolUseID = block.Get("tool_use_id").String()
 		}

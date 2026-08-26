@@ -112,9 +112,9 @@ func TestPlanBlocksClassifiesTypes(t *testing.T) {
 	if s := byIndex[5]; s.kind != slotCompressible || s.text != long {
 		t.Errorf("tool_result block: kind = %v, len(text) = %d", s.kind, len(s.text))
 	}
-	// An unrecognized type is skipped entirely, not planned.
-	if _, ok := byIndex[6]; ok {
-		t.Error("image block must not appear in the plan")
+	// Image blocks are now recognized and planned as slotImage.
+	if s := byIndex[6]; s.kind != slotImage || s.text != long {
+		t.Errorf("image block: kind = %v, len(text) = %d, want slotImage", s.kind, len(s.text))
 	}
 	if s := byIndex[7]; s.kind != slotBelowThreshold {
 		t.Errorf("short text block kind = %v, want slotBelowThreshold", s.kind)
@@ -157,18 +157,6 @@ func TestPlanBlocksStringContent(t *testing.T) {
 	}
 	if body[slots[0].start:slots[0].end] != `"`+text+`"` {
 		t.Error("string-content range did not slice back exactly")
-	}
-}
-
-// A tool_result whose content is a structured array is unsupported and must
-// be skipped rather than mangled.
-func TestPlanBlocksSkipsStructuredToolResult(t *testing.T) {
-	long := big(600)
-	body := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"` + long + `"}]}]}]}`
-	for _, s := range planBlocks(body, 0) {
-		if s.kind == slotCompressible {
-			t.Error("structured tool_result content must not be planned as compressible")
-		}
 	}
 }
 

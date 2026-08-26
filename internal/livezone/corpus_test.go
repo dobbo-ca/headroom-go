@@ -156,7 +156,8 @@ func TestCorpusClassify(t *testing.T) {
 			Reason:   string(res.Reason),
 		}
 		for _, blk := range res.Blocks {
-			if blk.BlockType == "tool_result" {
+			// Nested blocks have BlockType "text"/"image" and ContentIndex >= 0
+			if blk.BlockType == "tool_result" || blk.ContentIndex >= 0 {
 				o.Action, o.Strategy = blk.Action, blk.Strategy
 				o.Before, o.After = blk.TokensBefore, blk.TokensAfter
 			}
@@ -236,7 +237,7 @@ func TestCorpusSearchCounterfactual(t *testing.T) {
 		res := Dispatch(corpusBody(text), Options{
 			Policy: policy.ForMode(policy.PAYG), Router: rt, Store: store, FrozenCount: 0})
 		for _, b := range res.Blocks {
-			if b.BlockType == "tool_result" && b.Action == "compressed" {
+			if (b.BlockType == "tool_result" || b.ContentIndex >= 0) && b.Action == "compressed" {
 				return true, b.TokensAfter
 			}
 		}

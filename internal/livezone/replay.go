@@ -1,6 +1,7 @@
 package livezone
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
@@ -39,10 +40,24 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 	)
 	for msgIdx := range root.Get("messages").Array() {
 		for _, s := range planBlocks(bodyStr, msgIdx) {
-			if s.kind != slotCompressible && s.kind != slotStringContent {
+			if s.kind != slotCompressible && s.kind != slotStringContent && s.kind != slotImage {
 				continue
 			}
-			hash := ccr.ComputeKey([]byte(s.text))
+
+			var hash string
+			if s.kind == slotImage {
+				// Extract media type for image replay key
+				var mediaTypeField string
+				if s.contentIndex >= 0 {
+					mediaTypeField = fmt.Sprintf("messages.%d.content.%d.content.%d.source.media_type", msgIdx, s.blockIndex, s.contentIndex)
+				} else {
+					mediaTypeField = fmt.Sprintf("messages.%d.content.%d.source.media_type", msgIdx, s.blockIndex)
+				}
+				mediaType := gjson.Get(bodyStr, mediaTypeField).String()
+				hash = imageReplayKey(mediaType, s.text)
+			} else {
+				hash = ccr.ComputeKey([]byte(s.text))
+			}
 			compressed, ok := opts.Replay.Lookup(hash)
 			if !ok {
 				continue
@@ -68,7 +83,11 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 			// store read each time. The staleness sweep would not collect
 			// it either, because replay looks it up every turn and that is
 			// exactly what marks an entry live.
-			if opts.Store != nil {
+			if s.kind == slotImage {
+				// Images have no CCR store entry: the replacement is the
+				// resized image itself, not a marker. Skip store refresh
+				// and storeResolves entirely.
+			} else if opts.Store != nil {
 				opts.Store.Put(hash, s.text)
 				// The canonical entry is not the only one the replayed
 				// text names. The heuristic compressors append their own
@@ -89,13 +108,20 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 					opts.Replay.Forget(hash)
 					outcomes = append(outcomes, BlockOutcome{
 						MessageIndex: msgIdx, Index: s.blockIndex,
-						BlockType: s.blockType, Action: "store_unresolvable", CacheKey: hash})
+						BlockType: s.blockType, Action: "store_unresolvable", CacheKey: hash, ContentIndex: s.contentIndex})
 					continue
 				}
 			}
 
-			b := tok.CountText(s.text)
-			a := tok.CountText(compressed)
+			var b, a int
+			if s.kind == slotImage {
+				// Visual tokens, not text tokens
+				b = visualTokensFromBase64(s.text)
+				a = visualTokensFromBase64(compressed)
+			} else {
+				b = tok.CountText(s.text)
+				a = tok.CountText(compressed)
+			}
 			reps = append(reps, replacement{
 				start: s.start, end: s.end, repl: encodeJSONString(compressed)})
 			outcomes = append(outcomes, BlockOutcome{
@@ -106,6 +132,7 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 				TokensBefore: b,
 				TokensAfter:  a,
 				CacheKey:     hash,
+				ContentIndex: s.contentIndex,
 			})
 			before += b
 			after += a

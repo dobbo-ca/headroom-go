@@ -11,6 +11,8 @@
 package livezone
 
 import (
+	"fmt"
+
 	"github.com/dobbo-ca/headroom-go/internal/cachecontrol"
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
@@ -102,6 +104,9 @@ type Options struct {
 	//
 	// Nil disables replay and Dispatch behaves as it did before.
 	Replay *cachestab.SessionReplay
+	// ImageFit downsamples oversized images to the standard vision tier.
+	// False by default: screenshot-understanding needs the fidelity.
+	ImageFit bool
 }
 
 // BlockOutcome records what happened to one content block.
@@ -111,11 +116,15 @@ type BlockOutcome struct {
 	MessageIndex int
 	Index        int
 	BlockType    string
-	Action       string // "compressed","replayed","hot_zone","below_threshold","no_op","rejected_tokens"
+	Action       string // "compressed","replayed","hot_zone","below_threshold","no_op","rejected_tokens","unreachable","image_resized","image_declined"
 	Strategy     string
 	TokensBefore int
 	TokensAfter  int
 	CacheKey     string
+	// ContentIndex is the block's index inside a tool_result's structured content
+	// array, or -1 when it is not nested. Without it two nested outcomes in one
+	// tool_result are indistinguishable: both carry the outer Index.
+	ContentIndex int
 }
 
 // Result is the outcome of a Dispatch. Body is never nil for a non-nil
@@ -230,11 +239,60 @@ func Dispatch(body []byte, opts Options) Result {
 		switch s.kind {
 		case slotHotZone:
 			outcomes = append(outcomes, BlockOutcome{
-				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone", ContentIndex: s.contentIndex})
 			continue
 		case slotBelowThreshold:
 			outcomes = append(outcomes, BlockOutcome{
-				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold", ContentIndex: s.contentIndex})
+			continue
+		case slotUnreachable:
+			outcomes = append(outcomes, BlockOutcome{
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "unreachable", ContentIndex: s.contentIndex})
+			continue
+		case slotImage:
+			if !opts.ImageFit {
+				outcomes = append(outcomes, BlockOutcome{
+					MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
+				continue
+			}
+			// Extract media type from the same path used to locate the data field
+			var mediaTypeField string
+			if s.contentIndex >= 0 {
+				// Nested image
+				mediaTypeField = fmt.Sprintf("messages.%d.content.%d.content.%d.source.media_type", msgIdx, s.blockIndex, s.contentIndex)
+			} else {
+				// Top-level image
+				mediaTypeField = fmt.Sprintf("messages.%d.content.%d.source.media_type", msgIdx, s.blockIndex)
+			}
+			mediaType := gjson.Get(bodyStr, mediaTypeField).String()
+
+			newB64, tokBefore, tokAfter, ok := fitImage(s.text, mediaType)
+			if !ok {
+				outcomes = append(outcomes, BlockOutcome{
+					MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
+				continue
+			}
+
+			// Image resize succeeded
+			outcomes = append(outcomes, BlockOutcome{
+				MessageIndex: msgIdx,
+				Index:        s.blockIndex,
+				BlockType:    s.blockType,
+				Action:       "image_resized",
+				TokensBefore: tokBefore,
+				TokensAfter:  tokAfter,
+				ContentIndex: s.contentIndex,
+			})
+
+			// Record for replay
+			if opts.Replay != nil {
+				opts.Replay.Record(imageReplayKey(mediaType, s.text), newB64)
+			}
+
+			reps = append(reps, replacement{
+				start: s.start, end: s.end, repl: encodeJSONString(newB64)})
+			before += tokBefore
+			after += tokAfter
 			continue
 		}
 
@@ -248,6 +306,7 @@ func Dispatch(body []byte, opts Options) Result {
 			TokensBefore: br.tokensBefore,
 			TokensAfter:  br.tokensAfter,
 			CacheKey:     br.cacheKey,
+			ContentIndex: s.contentIndex,
 		})
 		if br.action == "rejected_tokens" {
 			// ReasonAllRejected is reserved for blocks that actually failed
