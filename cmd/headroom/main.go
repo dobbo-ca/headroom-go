@@ -22,13 +22,15 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	// "mcp serve" owns stdout for the protocol stream, so every diagnostic
-	// cobra emits has to go to stderr instead.
-	root.SetOut(os.Stderr)
+	// Diagnostics and errors go to stderr; stdout belongs to whichever
+	// command is producing output. "mcp serve" owns stdout for the protocol
+	// stream and redirects its own writer (see newMCPCmd); "perf" writes its
+	// report there so it can be piped.
 	root.SetErr(os.Stderr)
 	root.AddCommand(newMCPCmd())
 	root.AddCommand(newProxyCmd())
 	root.AddCommand(newWrapCmd())
+	root.AddCommand(newPerfCmd())
 	return root
 }
 

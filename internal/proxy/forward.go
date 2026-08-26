@@ -6,12 +6,15 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
+	"github.com/dobbo-ca/headroom-go/internal/ledger"
 	"github.com/dobbo-ca/headroom-go/internal/livezone"
 	"github.com/dobbo-ca/headroom-go/internal/policy"
+	"github.com/tidwall/gjson"
 )
 
 // anthropicMessagesPath is the only shape the live-zone dispatcher handles.
@@ -80,7 +83,7 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 
 	mode := policy.ClassifyHeader(r.Header)
 	sessionKey := cachestab.SessionKey(r.Header, r.RemoteAddr, body)
-	s.observeCacheStability(sessionKey, body)
+	drift := s.observeCacheStability(sessionKey, body)
 
 	// The real frozen floor is what the PREVIOUS turn of this session sent,
 	// not where the client put its newest cache_control marker. That marker
@@ -110,7 +113,45 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 		"reason", string(res.Reason), "bytes_in", len(body), "bytes_out", len(res.Body),
 		"frozen_count", res.FrozenCount, "replay", replay != nil,
 		"replay_first_turn", replay != nil && replay.FirstTurn())
+
+	s.record(sessionKey, body, drift, res)
 	return res.Body, &res
+}
+
+// record appends this turn to the ledger. It runs AFTER the dispatcher and
+// nothing reads it back, so the timestamp it stamps cannot reach the bytes
+// forwarded upstream and determinism (I4) still holds.
+func (s *Server) record(sessionKey string, body []byte, drift []string, res livezone.Result) {
+	if s.ledger == nil {
+		return
+	}
+	var strategies []string
+	seen := map[string]bool{}
+	replayed := 0
+	for _, b := range res.Blocks {
+		if b.Action == "replayed" {
+			replayed++
+		}
+		if b.Strategy != "" && !seen[b.Strategy] {
+			seen[b.Strategy] = true
+			strategies = append(strategies, b.Strategy)
+		}
+	}
+	sort.Strings(strategies)
+
+	s.ledger.Append(ledger.Entry{
+		Session:      cachestab.Digest(sessionKey),
+		Model:        gjson.GetBytes(body, "model").String(),
+		Messages:     int(gjson.GetBytes(body, "messages.#").Int()),
+		BytesIn:      len(body),
+		BytesOut:     len(res.Body),
+		TokensBefore: res.TokensBefore,
+		TokensAfter:  res.TokensAfter,
+		Reason:       string(res.Reason),
+		Strategies:   strategies,
+		Replayed:     replayed,
+		Drift:        drift,
+	})
 }
 
 // sessionReplay opens this turn's replay handle, or returns nil when replay
@@ -143,7 +184,7 @@ func (s *Server) sessionReplay(h http.Header, body []byte) *cachestab.SessionRep
 // This runs before the dispatcher deliberately. The detectors describe what
 // the CLIENT sent, which is what the customer can act on; describing our own
 // output would just report our own compression as drift.
-func (s *Server) observeCacheStability(sessionKey string, body []byte) {
+func (s *Server) observeCacheStability(sessionKey string, body []byte) []string {
 	for _, f := range cachestab.DetectVolatile(body) {
 		slog.Warn("volatile content in the cached prefix will bust prompt-cache hits",
 			"event", "volatile_content_detected",
@@ -151,7 +192,7 @@ func (s *Server) observeCacheStability(sessionKey string, body []byte) {
 	}
 
 	if s.drift == nil {
-		return
+		return nil
 	}
 	obs := s.drift.Observe(sessionKey, cachestab.ComputeStructuralHash(body))
 	switch {
@@ -166,4 +207,8 @@ func (s *Server) observeCacheStability(sessionKey string, body []byte) {
 		slog.Debug("cached prefix stable",
 			"event", "cache_prefix_stable", "session", obs.SessionDigest)
 	}
+	if obs.Drifted() {
+		return obs.Dims
+	}
+	return nil
 }

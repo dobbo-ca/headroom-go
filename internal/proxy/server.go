@@ -14,6 +14,7 @@ import (
 
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
+	"github.com/dobbo-ca/headroom-go/internal/ledger"
 	"github.com/dobbo-ca/headroom-go/internal/router"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 )
@@ -30,6 +31,8 @@ type Deps struct {
 	// separate `headroom mcp serve` will read the same markers this proxy
 	// writes. Nothing in the request path reads it.
 	CCRPath string
+	// Ledger records one line per request. Nil disables recording.
+	Ledger *ledger.Writer
 }
 
 // Server is the headroom proxy.
@@ -40,6 +43,9 @@ type Server struct {
 	// drift holds the per-session cache-prefix baselines. Observation only:
 	// it never reaches the bytes forwarded upstream.
 	drift *cachestab.DriftState
+	// ledger records one line per request for `headroom perf`. Nil when no
+	// ledger could be opened; Append tolerates a nil receiver.
+	ledger *ledger.Writer
 	// replay holds the per-session block compressions to reproduce on
 	// every later turn. Unlike drift this DOES reach the bytes forwarded
 	// upstream, so it is nil unless Config.Replay is on.
@@ -76,6 +82,7 @@ func New(d Deps) *Server {
 	return &Server{
 		deps:   d,
 		drift:  cachestab.NewDriftState(cachestab.DefaultDriftCapacity),
+		ledger: d.Ledger,
 		replay: replay,
 		client: &http.Client{
 			Transport: transport,

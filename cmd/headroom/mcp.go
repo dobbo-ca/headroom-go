@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
@@ -56,6 +57,11 @@ func newMCPCmd() *cobra.Command {
 	serve.Flags().StringVar(&ov.CCRPath, "ccr-path", "", "SQLite CCR file path (env HEADROOM_CCR_PATH)")
 	serve.Flags().StringVar(&ov.ProxyURL, "proxy-url", "", "headroom proxy base URL for retrieve fallback (env HEADROOM_PROXY_URL)")
 	serve.Flags().StringVar(&ov.Model, "model", "", "model name for token counting (env HEADROOM_MODEL)")
+
+	// The protocol stream owns stdout, so every diagnostic cobra would
+	// otherwise print there has to go to stderr instead.
+	mcpCmd.SetOut(os.Stderr)
+	serve.SetOut(os.Stderr)
 
 	mcpCmd.AddCommand(serve)
 	return mcpCmd

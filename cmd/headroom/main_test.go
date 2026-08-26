@@ -147,14 +147,39 @@ func originalTokensFrom(t *testing.T, stdout string) int {
 
 // newRootCmd must wire both streams to stderr before any caller overrides
 // them, otherwise a real "mcp serve" run corrupts the protocol stream.
-func TestRootDefaultsBothStreamsToStderr(t *testing.T) {
+// Errors always go to stderr. Stdout belongs to whichever command is
+// producing output — `perf` writes a report there so it can be piped into a
+// file, and `mcp serve` owns it for the protocol stream.
+func TestRootSendsErrorsToStderrAndOutputToStdout(t *testing.T) {
 	root := newRootCmd()
-	if root.OutOrStdout() != os.Stderr {
-		t.Error("root out stream is not os.Stderr")
-	}
 	if root.ErrOrStderr() != os.Stderr {
 		t.Error("root err stream is not os.Stderr")
 	}
+	if root.OutOrStdout() != os.Stdout {
+		t.Error("root out stream is not os.Stdout; a perf report could not be piped")
+	}
+}
+
+// The mcp command redirects its own writer, so nothing cobra prints can land
+// in the JSON-RPC stream. The behavioural proof is TestServeStartsWithMemory-
+// Backend and TestServeAnswersInitializeOnStdoutOnly; this pins the mechanism
+// they rely on, at the command that owns it.
+func TestMCPCommandKeepsStdoutForTheProtocol(t *testing.T) {
+	for _, c := range newRootCmd().Commands() {
+		if c.Name() != "mcp" {
+			continue
+		}
+		if c.OutOrStdout() != os.Stderr {
+			t.Error("mcp out stream is not os.Stderr")
+		}
+		for _, sub := range c.Commands() {
+			if sub.OutOrStdout() != os.Stderr {
+				t.Errorf("mcp %s out stream is not os.Stderr", sub.Name())
+			}
+		}
+		return
+	}
+	t.Fatal("no mcp command is registered")
 }
 
 // runServe executes "mcp serve" with stdin holding the given JSON-RPC lines and
