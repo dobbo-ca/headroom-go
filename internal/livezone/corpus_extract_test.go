@@ -92,7 +92,7 @@ func TestCorpusExtract(t *testing.T) {
 			}
 
 			body := sc.Bytes()
-			results := gjson.GetManyBytes(body, "role", "content")
+			results := gjson.GetManyBytes(body, "message.role", "message.content")
 			if results[0].String() != "user" {
 				continue
 			}
@@ -100,13 +100,13 @@ func TestCorpusExtract(t *testing.T) {
 				continue
 			}
 
-			for _, block := range results[1].Array() {
+			for i, block := range results[1].Array() {
 				if block.Get("type").String() != "tool_result" {
 					continue
 				}
 
 				// Extract wire-faithful content
-				contentResult := gjson.Get(string(body), fmt.Sprintf("content.%d.content", block.Index-results[1].Index-1))
+				contentResult := gjson.Get(string(body), fmt.Sprintf("message.content.%d.content", i))
 				wire := contentResult.Raw
 
 				// Check UTF-8 validity
@@ -136,6 +136,9 @@ func TestCorpusExtract(t *testing.T) {
 
 	if filesP1 == 0 {
 		t.Fatal("pass 1: found 0 files - check corpus root")
+	}
+	if blocksSeenP1 == 0 {
+		t.Fatal("pass 1: found 0 blocks - extractor is blind to the corpus schema")
 	}
 
 	t.Logf("Pass 1: %d files, %d blocks (>= 512B), %d unique", filesP1, blocksSeenP1, len(hashCounts))
@@ -174,6 +177,36 @@ func TestCorpusExtract(t *testing.T) {
 		}
 		defer f.Close()
 
+		// Build tool_use_id map for this file
+		toolMap := make(map[string]struct{ name, cmd string })
+		sc1 := bufio.NewScanner(f)
+		sc1.Buffer(make([]byte, 0, 1<<20), 256<<20)
+		for sc1.Scan() {
+			body := sc1.Bytes()
+			if gjson.GetBytes(body, "message.role").String() == "assistant" {
+				content := gjson.GetBytes(body, "message.content")
+				if content.IsArray() {
+					for _, blk := range content.Array() {
+						if blk.Get("type").String() == "tool_use" {
+							id := blk.Get("id").String()
+							toolMap[id] = struct{ name, cmd string }{
+								name: blk.Get("name").String(),
+								cmd:  blk.Get("input.command").String(),
+							}
+						}
+					}
+				}
+			}
+		}
+		if err := sc1.Err(); err != nil {
+			return err
+		}
+
+		// Rewind for main pass
+		if _, err := f.Seek(0, 0); err != nil {
+			return err
+		}
+
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 0, 1<<20), 256<<20)
 		for sc.Scan() {
@@ -183,7 +216,7 @@ func TestCorpusExtract(t *testing.T) {
 			}
 
 			body := sc.Bytes()
-			results := gjson.GetManyBytes(body, "role", "content")
+			results := gjson.GetManyBytes(body, "message.role", "message.content")
 			if results[0].String() != "user" {
 				continue
 			}
@@ -197,7 +230,7 @@ func TestCorpusExtract(t *testing.T) {
 				}
 
 				// Extract fields
-				contentPath := fmt.Sprintf("content.%d.content", i)
+				contentPath := fmt.Sprintf("message.content.%d.content", i)
 				contentResult := gjson.GetBytes(body, contentPath)
 				wire := contentResult.Raw
 
@@ -229,10 +262,12 @@ func TestCorpusExtract(t *testing.T) {
 					shape = "array"
 				}
 
-				// Extract tool and cmd
-				tool := block.Get("tool_use_id").String()
-				// Find the tool_use in assistant messages
-				toolName, cmd := findToolInfo(body, tool)
+				// Extract tool and cmd from map
+				toolUseID := block.Get("tool_use_id").String()
+				toolName, cmd := "", ""
+				if info, ok := toolMap[toolUseID]; ok {
+					toolName, cmd = info.name, info.cmd
+				}
 
 				uniqueBlocks++
 				uniqueWireBytes += wireBytes
@@ -301,25 +336,22 @@ func wireHashBytes(wire []byte) string {
 }
 
 func findToolInfo(body []byte, toolUseID string) (string, string) {
-	// Walk backwards through messages looking for the tool_use
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.IsArray() {
-		return "", ""
-	}
+	// JSONL format: each line is {message: {...}}
+	// We need the tool_use block from the assistant message in the same transcript
+	// For now, extract from the current message's metadata if available
+	// The full solution would require multi-line context, but toolUseID lookup
+	// is sufficient for the read-protection gate.
 
-	for _, msg := range messages.Array() {
-		if msg.Get("role").String() != "assistant" {
-			continue
-		}
-		content := msg.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-		for _, block := range content.Array() {
-			if block.Get("type").String() == "tool_use" && block.Get("id").String() == toolUseID {
-				name := block.Get("name").String()
-				cmd := block.Get("input.command").String()
-				return name, cmd
+	// Check if this line has assistant content with matching tool_use
+	if msgRole := gjson.GetBytes(body, "message.role").String(); msgRole == "assistant" {
+		content := gjson.GetBytes(body, "message.content")
+		if content.IsArray() {
+			for _, block := range content.Array() {
+				if block.Get("type").String() == "tool_use" && block.Get("id").String() == toolUseID {
+					name := block.Get("name").String()
+					cmd := block.Get("input.command").String()
+					return name, cmd
+				}
 			}
 		}
 	}

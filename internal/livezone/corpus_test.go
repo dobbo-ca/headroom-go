@@ -12,9 +12,15 @@ package livezone
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -188,57 +194,28 @@ func controlBlocks() []inBlock {
 }
 
 func make40x40PNGForControl() string {
-	// Minimal PNG that encodes to >512 bytes base64
-	var buf []byte
-	buf = append(buf, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
-	// IHDR
-	ihdr := []byte{
-		0x00, 0x00, 0x00, 0x0D,
-		0x49, 0x48, 0x44, 0x52,
-		0x00, 0x00, 0x00, 0x28,
-		0x00, 0x00, 0x00, 0x28,
-		0x08, 0x02, 0x00, 0x00, 0x00,
-		0x4E, 0xEC, 0x6C, 0x2E,
+	// Generate a real PNG large enough to exceed 512 bytes base64
+	// Use 100x100 with a pattern that doesn't compress well
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	for y := 0; y < 100; y++ {
+		for x := 0; x < 100; x++ {
+			// Use a pseudo-random pattern to prevent compression
+			img.Set(x, y, color.RGBA{
+				R: uint8((x*73 + y*157) % 256),
+				G: uint8((x*97 + y*181) % 256),
+				B: uint8((x*131 + y*211) % 256),
+				A: 255,
+			})
+		}
 	}
-	buf = append(buf, ihdr...)
-	// IDAT with enough data to exceed 512 base64
-	idatData := make([]byte, 400)
-	for i := range idatData {
-		idatData[i] = byte(i % 256)
-	}
-	idat := []byte{0x00, 0x00, 0x01, 0x90, 0x49, 0x44, 0x41, 0x54}
-	idat = append(idat, idatData...)
-	idat = append(idat, 0x00, 0x00, 0x00, 0x00)
-	buf = append(buf, idat...)
-	// IEND
-	iend := []byte{0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82}
-	buf = append(buf, iend...)
 
-	// Base64 encode
-	const base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var result []byte
-	for i := 0; i < len(buf); i += 3 {
-		chunk := uint32(buf[i]) << 16
-		if i+1 < len(buf) {
-			chunk |= uint32(buf[i+1]) << 8
-		}
-		if i+2 < len(buf) {
-			chunk |= uint32(buf[i+2])
-		}
-		result = append(result, base64Chars[(chunk>>18)&0x3F])
-		result = append(result, base64Chars[(chunk>>12)&0x3F])
-		if i+1 < len(buf) {
-			result = append(result, base64Chars[(chunk>>6)&0x3F])
-		} else {
-			result = append(result, '=')
-		}
-		if i+2 < len(buf) {
-			result = append(result, base64Chars[chunk&0x3F])
-		} else {
-			result = append(result, '=')
-		}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return ""
 	}
-	return string(result)
+
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+	return encoded
 }
 
 // reachStats accumulates metrics for the reach table
@@ -265,6 +242,7 @@ func TestCorpusClassify(t *testing.T) {
 	byAction := make(map[string]*reachStats)
 
 	visualStats := &reachStats{}
+	countedBlocks := make(map[string]bool) // Track which blocks we've counted for wire bytes
 
 	run := func(b inBlock, isControl bool) {
 		// Handle reshaped blocks
@@ -320,7 +298,7 @@ func TestCorpusClassify(t *testing.T) {
 				}
 			}
 
-			// Accumulate stats (occurrence-weighted)
+			// Accumulate per-row stats (occurrence-weighted)
 			if !isControl {
 				occ := b.Occurrences
 				if occ == 0 {
@@ -332,14 +310,12 @@ func TestCorpusClassify(t *testing.T) {
 					byReach[reach] = &reachStats{}
 				}
 				byReach[reach].rows += occ
-				byReach[reach].wireBytes += b.WireBytes * occ
 
 				if row.TokenKind == "text" {
 					byReach[reach].textTokens += row.TokensBefore * occ
 				} else if row.TokenKind == "visual" {
 					visualStats.rows += occ
 					visualStats.textTokens += row.TokensBefore * occ
-					visualStats.wireBytes += b.WireBytes * occ
 				}
 
 				// Also accumulate by action for declined breakdown
@@ -349,9 +325,22 @@ func TestCorpusClassify(t *testing.T) {
 					}
 					byAction[row.Action].rows += occ
 					byAction[row.Action].textTokens += row.TokensBefore * occ
-					byAction[row.Action].wireBytes += b.WireBytes * occ
 				}
 			}
+		}
+
+		// Wire bytes: attribute once per unique block to primary reach state
+		// Do NOT multiply by occurrences here - we want unique bytes for the unique denominator
+		if !isControl && !countedBlocks[b.Sha] && len(rows) > 0 {
+			primaryReach := rows[0].Reach
+			byReach[primaryReach].wireBytes += b.WireBytes
+
+			// For visual blocks, also count in visualStats
+			if rows[0].TokenKind == "visual" {
+				visualStats.wireBytes += b.WireBytes
+			}
+
+			countedBlocks[b.Sha] = true
 		}
 
 		// For controls, validate expectations
@@ -385,7 +374,8 @@ func TestCorpusClassify(t *testing.T) {
 	}
 
 	// Read meta for denominators
-	metaPath := envOr("TIO_IN", "/tmp/tio") + "/../meta.json"
+	inPath := envOr("TIO_IN", "/tmp/tio/blocks.jsonl")
+	metaPath := filepath.Join(filepath.Dir(inPath), "meta.json")
 	var meta extractMeta
 	if mf, err := os.Open(metaPath); err == nil {
 		json.NewDecoder(mf).Decode(&meta)
@@ -402,27 +392,35 @@ func mustTokenizer(t *testing.T) tokenizer.Tokenizer {
 }
 
 func visualTokensFromWireImage(wire string) int {
-	// Parse the wire to extract base64 data from image block
+	// Parse the wire to extract base64 data from image block(s)
 	// Wire can be string or array format
 	if len(wire) == 0 {
 		return 0
 	}
 
-	var base64Data string
+	totalTokens := 0
 	if wire[0] == '[' {
-		// Array format: [{"type":"image","source":{"data":"..."}}]
-		result := gjson.Get(wire, "0.source.data")
-		base64Data = result.String()
+		// Array format: may contain multiple images
+		parsed := gjson.Parse(wire)
+		if parsed.IsArray() {
+			for _, elem := range parsed.Array() {
+				if elem.Get("type").String() == "image" {
+					base64Data := elem.Get("source.data").String()
+					if base64Data != "" {
+						totalTokens += visualTokensFromBase64(base64Data)
+					}
+				}
+			}
+		}
 	} else {
 		// String format: just the base64 directly
-		base64Data = strings.Trim(wire, `"`)
+		base64Data := strings.Trim(wire, `"`)
+		if base64Data != "" {
+			totalTokens = visualTokensFromBase64(base64Data)
+		}
 	}
 
-	if base64Data == "" {
-		return 0
-	}
-
-	return visualTokensFromBase64(base64Data)
+	return totalTokens
 }
 
 func validateControl(t *testing.T, b inBlock, res Result, rows []corpusRow) {
@@ -556,10 +554,12 @@ func printReachTable(t *testing.T, byReach map[string]*reachStats, byAction map[
 	t.Logf("")
 	t.Logf("=== IMAGES — VISUAL TOKENS (never summed with text) ===")
 	printReachRow("visual", visualStats, 0)
-	t.Logf("CAUTION: images are %.1f%% of unique tool_result WIRE BYTES but",
-		100.0*float64(visualStats.wireBytes)/float64(meta.UniqueWireBytes))
-	t.Logf("         %d visual tokens. Counting that base64 as text would overstate by ~57x.",
-		visualStats.textTokens)
+	pctImageBytes := 0.0
+	if meta.UniqueWireBytes > 0 {
+		pctImageBytes = 100.0 * float64(visualStats.wireBytes) / float64(meta.UniqueWireBytes)
+	}
+	t.Logf("CAUTION: images are %.1f%% of unique tool_result WIRE BYTES,", pctImageBytes)
+	t.Logf("         but %d visual tokens (not text tokens).", visualStats.textTokens)
 }
 
 func envOr(k, def string) string {
@@ -605,9 +605,9 @@ func TestCorpusSearchCounterfactual(t *testing.T) {
 		newlyCompressed             int
 		newlyIn, newlyOut           int
 	)
-	run := func(rt *router.Router, text string) (bool, int) {
+	run := func(rt *router.Router, wire, tool, cmd string) (bool, int) {
 		store, _ := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 8})
-		res := Dispatch(corpusBody(text), Options{
+		res := Dispatch(corpusBodyWire(wire, tool, cmd), Options{
 			Policy: policy.ForMode(policy.PAYG), Router: rt, Store: store, FrozenCount: 0})
 		for _, b := range res.Blocks {
 			if (b.BlockType == "tool_result" || b.ContentIndex >= 0) && b.Action == "compressed" {
@@ -623,17 +623,8 @@ func TestCorpusSearchCounterfactual(t *testing.T) {
 			continue
 		}
 		blocks++
-		// Wire can be string or array - extract text for compression test
-		text := b.Wire
-		if len(text) > 0 && text[0] == '"' {
-			// Unquote string wire
-			var s string
-			if json.Unmarshal([]byte(text), &s) == nil {
-				text = s
-			}
-		}
-		okBase, _ := run(base, text)
-		okPlus, _ := run(plus, text)
+		okBase, _ := run(base, b.Wire, b.Tool, b.Cmd)
+		okPlus, _ := run(plus, b.Wire, b.Tool, b.Cmd)
 		if okBase {
 			baseHits++
 			baseBytesIn += b.WireBytes
@@ -646,9 +637,23 @@ func TestCorpusSearchCounterfactual(t *testing.T) {
 			newlyCompressed++
 			newlyIn += b.WireBytes
 			// Measure the actual emitted size for the newly-covered blocks.
-			store, _ := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 8})
-			r := plus.Compress(text, transform.CompressionContext{}, store)
-			newlyOut += len(r.Output)
+			// Note: Router.Compress expects the extracted text, not wire JSON
+			var text string
+			if len(b.Wire) > 0 && b.Wire[0] == '"' {
+				// String wire: unquote
+				json.Unmarshal([]byte(b.Wire), &text)
+			} else {
+				// Array wire: extract text from first element if present
+				elem := gjson.Get(b.Wire, "0.text")
+				if elem.Exists() {
+					text = elem.String()
+				}
+			}
+			if text != "" {
+				store, _ := ccr.FromConfig(ccr.BackendConfig{Kind: ccr.InMemory, Capacity: 8})
+				r := plus.Compress(text, transform.CompressionContext{}, store)
+				newlyOut += len(r.Output)
+			}
 		}
 	}
 	_ = baseBytesSaved
