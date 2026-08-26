@@ -8,17 +8,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/dobbo-ca/headroom-go/internal/ccr"
-	_ "github.com/dobbo-ca/headroom-go/internal/ccr/backends" // registers the store backends
 	"github.com/dobbo-ca/headroom-go/internal/config"
-	"github.com/dobbo-ca/headroom-go/internal/paths"
 	"github.com/dobbo-ca/headroom-go/internal/proxy"
-	"github.com/dobbo-ca/headroom-go/internal/router"
-	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 	"github.com/spf13/cobra"
 )
 
@@ -211,23 +205,10 @@ func proxyConfigFor(spec agentSpec, base, upstream string) (proxy.Config, error)
 // startProxy runs the proxy in this process and returns a function that stops
 // it and waits for the listener to drain.
 func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func(), error) {
-	if cfg.CCRPath != "" {
-		if err := paths.EnsureDir(filepath.Dir(cfg.CCRPath)); err != nil {
-			return nil, fmt.Errorf("create CCR directory: %w", err)
-		}
-	}
-	store, err := ccr.FromConfig(cfg.BackendConfig())
+	srv, err := newProxyServer(pcfg, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open CCR store: %w", err)
+		return nil, err
 	}
-	srv := proxy.New(proxy.Deps{
-		Config:    pcfg,
-		Store:     store,
-		Router:    router.NewDefault(),
-		Tokenizer: tokenizer.GetTokenizer(cfg.Model),
-		Version:   version,
-		CCRPath:   cfg.CCRPath,
-	})
 
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
