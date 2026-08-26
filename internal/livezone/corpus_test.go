@@ -21,6 +21,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -222,7 +223,11 @@ func make40x40PNGForControl() string {
 type reachStats struct {
 	rows       int
 	textTokens int
-	wireBytes  int
+	// textTokensAfter is what the same rows cost AFTER the dispatcher acted.
+	// Reach and saving are different questions and this table answers both:
+	// a block can be reached, acted on, and still barely shrink.
+	textTokensAfter int
+	wireBytes       int
 }
 
 func TestCorpusClassify(t *testing.T) {
@@ -313,9 +318,11 @@ func TestCorpusClassify(t *testing.T) {
 
 				if row.TokenKind == "text" {
 					byReach[reach].textTokens += row.TokensBefore * occ
+					byReach[reach].textTokensAfter += row.TokensAfter * occ
 				} else if row.TokenKind == "visual" {
 					visualStats.rows += occ
 					visualStats.textTokens += row.TokensBefore * occ
+					visualStats.textTokensAfter += row.TokensAfter * occ
 				}
 
 				// Also accumulate by action for declined breakdown
@@ -508,6 +515,14 @@ func printReachTable(t *testing.T, byReach map[string]*reachStats, byAction map[
 		meta.BlocksSeen, float64(meta.WireBytesSeen)/1e6)
 	t.Logf("  REACHABLE = acted + declined only")
 	t.Logf("")
+	t.Logf("  READ THE WEIGHTING. The two halves of this table count different")
+	t.Logf("  populations, on purpose, and comparing them is a category error:")
+	t.Logf("    token columns are OCCURRENCE-WEIGHTED (as-sent) - a block re-sent")
+	t.Logf("      74 times cost the window 74 times, which is what a token asks")
+	t.Logf("    byte columns are UNIQUE-weighted - each distinct block counted once,")
+	t.Logf("      which is what a corpus-composition question asks")
+	t.Logf("  So a row's token %% and its byte %% are not two views of one number.")
+	t.Logf("")
 
 	printReachRow := func(label string, s *reachStats, denom int) {
 		if s == nil {
@@ -536,7 +551,8 @@ func printReachTable(t *testing.T, byReach map[string]*reachStats, byAction map[
 			label, s.rows, s.textTokens, pctAll, reachStr, s.wireBytes, pctAllBytes)
 	}
 
-	t.Logf("%-20s %6s %12s %8s %12s %12s %8s", "reach", "rows", "text tokens", "% ALL", "% REACHABLE", "wire bytes", "% ALL bytes")
+	t.Logf("%-20s %6s %12s %8s %12s %12s %8s",
+		"reach", "rows", "tok as-sent", "% tok", "% tok REACH", "bytes uniq", "% bytes")
 	t.Logf("%-20s %6s %12s %8s %12s %12s %8s", "----", "----", "----", "----", "----", "----", "----")
 
 	printReachRow("acted", byReach["acted"], reachableTextTokens)
@@ -547,8 +563,44 @@ func printReachTable(t *testing.T, byReach map[string]*reachStats, byAction map[
 
 	t.Logf("")
 	t.Logf("=== DECLINED BREAKDOWN ===")
-	for action, s := range byAction {
-		printReachRow("  "+action, s, 0)
+	// Sorted, because an unsorted map range makes two runs of the same corpus
+	// diff against each other for no reason, and this table exists to be
+	// compared between runs.
+	declinedActions := make([]string, 0, len(byAction))
+	for action := range byAction {
+		declinedActions = append(declinedActions, action)
+	}
+	sort.Slice(declinedActions, func(i, j int) bool {
+		a, b := byAction[declinedActions[i]], byAction[declinedActions[j]]
+		if a.textTokens != b.textTokens {
+			return a.textTokens > b.textTokens
+		}
+		return declinedActions[i] < declinedActions[j]
+	})
+	for _, action := range declinedActions {
+		printReachRow("  "+action, byAction[action], 0)
+	}
+
+	// REACH IS NOT SAVING, and the historical figure this table replaces was a
+	// saving. Without this section "acted 45.5%" reads as "45.5% saved", which
+	// is the same family of error as calling a byte share what a user sees.
+	t.Logf("")
+	t.Logf("=== WHAT WAS ACTUALLY REMOVED — the saving, not the reach ===")
+	if acted := byReach["acted"]; acted != nil {
+		removed := acted.textTokens - acted.textTokensAfter
+		t.Logf("  acted rows        %d tok before -> %d after, %d removed",
+			acted.textTokens, acted.textTokensAfter, removed)
+		if acted.textTokens > 0 {
+			t.Logf("  cut within acted  %.1f%%   of the tokens the dispatcher acted on",
+				100.0*float64(removed)/float64(acted.textTokens))
+		}
+		if allTextTokens > 0 {
+			t.Logf("  cut over ALL      %.1f%%   of every text token in the corpus, as-sent",
+				100.0*float64(removed)/float64(allTextTokens))
+			t.Logf("                    ^ THIS is the figure comparable to the old 38.3%%,")
+			t.Logf("                      which was quoted over a denominator that included")
+			t.Logf("                      bytes production could not then reach.")
+		}
 	}
 
 	t.Logf("")
