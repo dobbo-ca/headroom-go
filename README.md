@@ -4,7 +4,24 @@ Clean-room Go port of [headroom](https://github.com/chopratejas/headroom) — an
 LLM context-compression layer. Compress tool outputs, logs, diffs, and search
 results before they reach the model: 60–95% fewer tokens, same answers.
 
-Status: v0.1 in progress (compression engine + MCP server). See
+## Quickstart
+
+```bash
+brew install dobbo-ca/taps/headroom-go
+headroom wrap claude
+```
+
+That is the whole thing. `headroom wrap` starts the proxy, points Claude Code
+at it, gives Claude a headroom MCP server on the same CCR store so it can
+dereference the markers it sees, and stops both when Claude exits.
+
+After a day of use, ask whether it was worth it:
+
+```bash
+headroom perf
+```
+
+Status: v0.1 (compression engine, proxy, MCP server, wrap, perf). See
 `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ## Install
@@ -74,7 +91,7 @@ headroom proxy
 | — | `HEADROOM_PROXY_MAX_BODY_BYTES` | `33554432` (32 MiB) | Request body cap; `0` means uncapped |
 | — | `HEADROOM_PROXY_TIMEOUT_SECONDS` | `600` | Per-request context deadline (there is no client-wide timeout, so long SSE streams are never cut) |
 | — | `HEADROOM_PROXY_COMPRESS` | on | Set to `disabled`, `off`, `false`, `0`, or `no` to forward request bodies unmodified |
-| — | `HEADROOM_PROXY_REPLAY` | off | Set to `enabled`, `on`, `true`, `1`, or `yes` to re-send a compressed block in its compressed form on every later turn of the same session |
+| — | `HEADROOM_PROXY_REPLAY` | on | Set to `disabled`, `off`, `false`, `0`, or `no` to stop re-sending a compressed block in its compressed form on every later turn of the same session |
 
 #### `HEADROOM_PROXY_REPLAY`
 
@@ -89,16 +106,28 @@ cached prefix keeps matching. Compressing without replaying is worse than doing
 nothing: the client re-sends the original, the prefix no longer matches, and
 every turn pays a fresh cache write.
 
-Two things to know before turning it on:
+Replay is on by default. Three guard rails hold it up:
 
-- **Run `headroom mcp serve` against the same CCR store.** With replay on, the
-  model no longer sees its own earlier tool results and recovers them by
-  calling `headroom_retrieve`. Without the MCP server it sees `<<ccr:HASH>>`
-  markers it cannot dereference, for the whole session rather than one turn.
-- **Sessions are identified by `x-claude-code-session-id`**, falling back to
-  `x-headroom-session-id`, then to a credential-and-first-message fingerprint.
-  A client that sends neither header still works; replay simply does not fire,
-  and the proxy behaves exactly as it does with replay off.
+- **A client that declares no session gets no replay.** The identity must come
+  from `x-headroom-session-id` or `x-claude-code-session-id`. The fallbacks the
+  drift detector uses — a credential, or the client address and User-Agent —
+  identify a tenant rather than a conversation, and the address one rotates per
+  TCP connection. A client sending neither header still works; replay is a
+  no-op and logs one warning.
+- **A marker whose original the store cannot hand back never goes on the
+  wire.** Every accepted block has its markers read back first, in both
+  surfaces: the canonical `<<ccr:HASH>>` and the compressors' inline `hash=`.
+  A block that fails is forwarded untouched.
+- **Entries are swept once the client stops re-sending their block.** A block
+  still in the conversation is looked up every turn, so an entry unseen for
+  three turns has scrolled out. A long-running proxy holds the live working set
+  rather than the whole day.
+
+**Run the MCP server against the same CCR store.** With replay on, the model no
+longer sees its own earlier tool results and recovers them by calling
+`headroom_retrieve`. `headroom wrap` wires that for you and refuses to start a
+session it cannot wire; if you run `headroom proxy` yourself, start
+`headroom mcp serve --ccr-path` on the same file.
 
 `GET /healthz` reports the proxy itself; `GET /healthz/upstream` checks the
 configured upstream. `POST /v1/retrieve` is headroom's own route — it is
@@ -107,14 +136,71 @@ marker back to the original bytes it replaced.
 
 ### `headroom wrap`
 
-`headroom wrap claude` (or `headroom wrap codex`) starts the proxy if one
-is not already running, points the agent's base URL at it, and execs the
-agent CLI:
+One command brings up everything and tears it down again:
 
 ```bash
 headroom wrap claude
+headroom wrap claude -p 'summarise this repo' --model sonnet
 headroom wrap codex --upstream https://api.openai.com
 ```
+
+It reuses a proxy already listening at `HEADROOM_PROXY_URL`, and otherwise runs
+one **in its own process** — so the proxy cannot outlive the agent and cannot
+die behind its back. The upstream defaults per agent, so neither
+`HEADROOM_PROXY_UPSTREAM` nor a `--` separator is needed.
+
+For `claude` it also passes an inline `--mcp-config` that launches
+`headroom mcp serve` against the same CCR store the proxy writes to, which is
+what lets the model dereference a `<<ccr:HASH>>`.
+
+If it cannot wire that server — the agent takes no inline MCP flag, or the
+store is in memory and so unshareable — then with replay **on** it refuses to
+start, and with replay **off** it warns and runs. An unresolvable marker costs
+one turn without replay and the whole session with it.
+
+## Was it worth it?
+
+```bash
+headroom perf
+```
+
+`headroom perf` joins headroom's own ledger — one line per turn at
+`~/.headroom/ledger.jsonl` — to the usage records Claude Code already writes
+under `~/.claude/projects`. It reports what headroom removed *and* what the
+prompt cache did about it, because bytes saved with a busted cache is a loss.
+
+```
+WHAT HEADROOM DID
+  turns             142   (96 compressed)
+  bytes sent        18.9 MB of 20.6 MB
+  whole-body saving 8.3%   <- what a user actually sees
+  blocks replayed   311
+  strategies        log_offload 61, log_template 35
+
+WHAT THE CACHE DID          from Claude Code's own usage records
+  cache read        4,102,881 tok   94.1%   billed 0.1x
+  cache write 1h      210,004 tok    4.8%   billed 2.00x
+  fresh input          47,551 tok    1.1%   billed 1.0x
+  cache-read share  94.1%
+  same, unproxied   96.3%   over 2,419 sessions that did not go through headroom
+  prefix rewrites   14 turns   early_messages 14
+```
+
+Pricing uses Anthropic's real multipliers: a cached read is billed at 0.1x, a
+five-minute cache write at 1.25x, and a one-hour write at 2.0x. Claude Code
+uses the one-hour TTL, so merging the two writes would understate the cache's
+cost badly.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--ledger` | `~/.headroom/ledger.jsonl` | Ledger file to read |
+| `--transcripts` | `~/.claude/projects` | Claude Code project directory |
+| `--since` | all | Only count turns newer than this, e.g. `24h` |
+| `--json` | off | Emit the report as JSON |
+
+The unproxied figure is a different set of sessions, not a control; the report
+labels it as such. Every number that combines the two sources is withheld when
+they cannot be describing the same traffic.
 
 ## MCP server
 
