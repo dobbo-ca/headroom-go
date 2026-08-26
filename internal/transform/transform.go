@@ -53,6 +53,15 @@ type CompressionContext struct {
 	// ToolCommand is the shell command for a Bash-family tool, or "". A
 	// `cat`/`sed -n` of a file is a read even though the tool is Bash.
 	ToolCommand string
+	// ToolInput is the raw JSON of the tool_use input object, or "" when
+	// unknown. A transform needs it to veto range-read keys and extract the
+	// file_path for progressive disclosure.
+	ToolInput string
+	// PriorReads is the count of Read-family tool_uses for the same file_path
+	// that appear earlier in this request body (computed by blockContext from
+	// toolpairs.Index). ReadOutline uses it for progressive disclosure: the
+	// second Read of the same file returns raw content.
+	PriorReads int
 }
 
 // Sentinel errors. ALL mean "skip this transform, continue the pipeline,

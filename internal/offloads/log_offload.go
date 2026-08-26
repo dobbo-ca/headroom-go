@@ -5,6 +5,7 @@ import (
 
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/compress"
+	"github.com/dobbo-ca/headroom-go/internal/detect"
 	"github.com/dobbo-ca/headroom-go/internal/signals"
 	"github.com/dobbo-ca/headroom-go/internal/transform"
 )
@@ -75,7 +76,17 @@ func (o *LogOffload) EstimateBloat(content string) float32 {
 
 // Apply delegates to the wrapped LogCompressor. A missing CacheKey becomes
 // ErrSkipped; the compressor itself stashed the original under its CacheKey.
-func (o *LogOffload) Apply(content string, _ transform.CompressionContext, store ccr.Store) (transform.OffloadOutput, error) {
+func (o *LogOffload) Apply(content string, ctx transform.CompressionContext, store ccr.Store) (transform.OffloadOutput, error) {
+	// PROTECTED READS. Code file reads must stay byte-exact. The detector cannot
+	// see through Read's line-number prefixes, so the extension overrides the
+	// detected content type. Measured 2026-08-26: 10.31 MB of .go Read output
+	// classified as BuildOutput was being shredded ~80% before this gate.
+	filePath := filePathFromToolInput(ctx.ToolInput)
+	if detect.ReadOutputIsProtected(ctx.ProducingTool, ctx.ToolCommand, filePath, transform.BuildOutput) {
+		return transform.OffloadOutput{}, fmt.Errorf(
+			"log_offload: %s output is a protected file read: %w", ctx.ProducingTool, transform.ErrSkipped)
+	}
+
 	r := o.compressor.Compress(content, store)
 	if r.CacheKey == "" {
 		return transform.OffloadOutput{}, fmt.Errorf("log_offload: no cache_key emitted: %w", transform.ErrSkipped)

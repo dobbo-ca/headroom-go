@@ -12,6 +12,10 @@ type ToolUse struct {
 	// Kept raw so a caller reads only the field it needs and no re-encoding can
 	// disturb the body.
 	Input string
+	// Seq is the document-order position of this tool_use in the messages array,
+	// used for progressive disclosure: a Read with Seq=10 sees all Reads with
+	// Seq<10 as "prior reads".
+	Seq int
 }
 
 // Index maps tool_use_id to the tool_use that produced it, in ONE pass over the
@@ -33,6 +37,7 @@ type ToolUse struct {
 // this needs no cross-request state.
 func Index(body []byte) map[string]ToolUse {
 	out := map[string]ToolUse{}
+	seq := 0
 	gjson.GetBytes(body, "messages").ForEach(func(_, msg gjson.Result) bool {
 		content := msg.Get("content")
 		if !content.IsArray() {
@@ -49,7 +54,9 @@ func Index(body []byte) map[string]ToolUse {
 			out[id] = ToolUse{
 				Name:  block.Get("name").String(),
 				Input: block.Get("input").Raw,
+				Seq:   seq,
 			}
+			seq++
 			return true
 		})
 		return true

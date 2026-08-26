@@ -155,7 +155,43 @@ func blockContext(opts Options, tools map[string]toolpairs.ToolUse, s planSlot) 
 	}
 	ctx.ProducingTool = u.Name
 	ctx.ToolCommand = gjson.Get(u.Input, "command").String()
+	ctx.ToolInput = u.Input
+
+	// Progressive disclosure: count prior Reads of the same file.
+	// ReadOutline uses this to decline on second-read (the model came back for more).
+	if isReadTool(u.Name) {
+		filePath := filePathFromInput(u.Input)
+		if filePath != "" {
+			for _, other := range tools {
+				if other.Seq < u.Seq && isReadTool(other.Name) {
+					if filePathFromInput(other.Input) == filePath {
+						ctx.PriorReads++
+					}
+				}
+			}
+		}
+	}
 	return ctx
+}
+
+// isReadTool reports whether toolName is a Read-family tool.
+func isReadTool(toolName string) bool {
+	switch toolName {
+	case "Read", "read_file", "view", "cat":
+		return true
+	}
+	return false
+}
+
+// filePathFromInput extracts the file_path from a tool_use input JSON, checking
+// the keys in upstream's order: file_path, path, filePath, filename.
+func filePathFromInput(inputJSON string) string {
+	for _, key := range []string{"file_path", "path", "filePath", "filename"} {
+		if v := gjson.Get(inputJSON, key); v.Exists() && v.String() != "" {
+			return v.String()
+		}
+	}
+	return ""
 }
 
 // storeResolves reports whether every retrieval marker in replacement can be

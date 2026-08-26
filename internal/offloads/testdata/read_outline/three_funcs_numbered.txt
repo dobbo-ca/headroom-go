@@ -1,0 +1,50 @@
+     1	package example
+     2
+     3	import "fmt"
+     4
+     5	// QuantizeIndexed converts a full-color image to indexed color.
+     6	func QuantizeIndexed(img image.Image, numColors int) *image.Paletted {
+     7		bounds := img.Bounds()
+     8		width, height := bounds.Dx(), bounds.Dy()
+     9		colors := extractColors(img, numColors)
+     10		palette := color.Palette(colors)
+     11		indexed := image.NewPaletted(bounds, palette)
+     12		for y := 0; y < height; y++ {
+     13			for x := 0; x < width; x++ {
+     14				indexed.Set(x, y, img.At(x, y))
+     15			}
+     16		}
+     17		return indexed
+     18	}
+     19
+     20	// Helper function
+     21	func extractColors(img image.Image, n int) []color.Color {
+     22		seen := make(map[color.Color]bool)
+     23		var colors []color.Color
+     24		bounds := img.Bounds()
+     25		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+     26			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+     27				c := img.At(x, y)
+     28				if !seen[c] {
+     29					seen[c] = true
+     30					colors = append(colors, c)
+     31					if len(colors) >= n {
+     32						return colors
+     33					}
+     34				}
+     35			}
+     36		}
+     37		return colors
+     38	}
+     39
+     40	// ConvertToGrayscale converts an image to grayscale.
+     41	func ConvertToGrayscale(img image.Image) *image.Gray {
+     42		bounds := img.Bounds()
+     43		gray := image.NewGray(bounds)
+     44		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+     45			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+     46				gray.Set(x, y, img.At(x, y))
+     47			}
+     48		}
+     49		return gray
+     50	}

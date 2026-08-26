@@ -9,26 +9,28 @@ import (
 )
 
 // NewDefault wires the v0.1 heuristic compressors into a Router: JSON minify +
-// log templating reformats, and the diff_noise/diff/json/log offloads. SearchOffload
-// is intentionally NOT registered (matches upstream). JsonOffload uses the Plan-3
-// SmartCrusher, injected here at the composition root — smartcrusher imports
+// log templating reformats, and the read_outline/diff_noise/diff/json/log/text offloads.
+// SearchOffload is intentionally NOT registered (matches upstream). JsonOffload uses
+// the Plan-3 SmartCrusher, injected here at the composition root — smartcrusher imports
 // offloads for the seam type, so offloads cannot import smartcrusher; this router
 // is the only production package free to import both.
 //
-// Registration order (= run order) matches upstream offloads/mod.rs:
+// Registration order (= run order):
 //   - reformats: JsonMinifier ([JsonArray]) -> LogTemplate ([BuildOutput])
-//   - offloads:  DiffNoise ([GitDiff]) -> DiffOffload ([GitDiff]) ->
+//   - offloads:  ReadOutline (FIRST, [PlainText, BuildOutput, SearchResults, SourceCode]) ->
+//     DiffNoise ([GitDiff]) -> DiffOffload ([GitDiff]) ->
 //     JsonOffload ([JsonArray]) -> LogOffload ([BuildOutput]) ->
 //     TextOffload ([PlainText])
 //
-// TextOffload has no upstream counterpart in this position: upstream reaches
-// its TextCrusher through the ContentRouter's PlainText -> TEXT strategy. The
-// effect is the same, and before it the PlainText bucket had no compressor at
-// all — 34.9% of a real 171.9 MB corpus, reached by nothing.
+// ReadOutline runs FIRST so it precedes LogOffload and TextOffload in every routing
+// list. It declines explicitly on non-Go extensions and non-Read tools, so it only
+// touches Go source Read output. LogOffload and TextOffload both check the
+// read-protection gate, which now recognizes code file extensions and protects them.
 func NewDefault() *Router {
 	p := pipeline.NewBuilder().
 		WithReformat(reformats.JsonMinifier{}).
 		WithReformat(reformats.LogTemplate{}).
+		WithOffload(offloads.NewReadOutline()).
 		WithOffload(offloads.NewDiffNoise()).
 		WithOffload(offloads.NewDiffOffload(compress.NewDiffCompressor())).
 		WithOffload(offloads.NewJsonOffloadWith(smartcrusher.NewSmartCrusher(smartcrusher.DefaultConfig()))).

@@ -69,7 +69,8 @@ func (o *TextOffload) Apply(content string, ctx transform.CompressionContext, st
 	// This arm carries most of the risk in this transform, because the code
 	// detector recognises only a handful of languages: Ruby, C, SQL, shell and
 	// Markdown all land in PlainText. Protecting reads is what keeps them safe.
-	if detect.ReadOutputIsProtected(ctx.ProducingTool, ctx.ToolCommand, transform.PlainText) {
+	filePath := filePathFromToolInput(ctx.ToolInput)
+	if detect.ReadOutputIsProtected(ctx.ProducingTool, ctx.ToolCommand, filePath, transform.PlainText) {
 		return transform.OffloadOutput{}, fmt.Errorf(
 			"text_offload: %s output is a protected file read: %w", ctx.ProducingTool, transform.ErrSkipped)
 	}
