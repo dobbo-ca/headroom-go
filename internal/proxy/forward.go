@@ -93,7 +93,7 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 	// one the client just appended and the provider has never seen. Without
 	// this, a block is never compressed on the turn it first appears, so it
 	// never enters the replay map and the feature does nothing at all.
-	frozen, replay := -1, s.sessionReplay(sessionKey, body)
+	frozen, replay := -1, s.sessionReplay(r.Header, body)
 	if replay != nil {
 		frozen = replay.Floor()
 	}
@@ -114,13 +114,26 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 }
 
 // sessionReplay opens this turn's replay handle, or returns nil when replay
-// is off. It is the ONLY path by which per-session state reaches the bytes
-// forwarded upstream.
-func (s *Server) sessionReplay(sessionKey string, body []byte) *cachestab.SessionReplay {
+// is off or the client declared no session. It is the ONLY path by which
+// per-session state reaches the bytes forwarded upstream.
+//
+// The identity here is deliberately NOT the one drift detection uses. Drift
+// only logs, so an inferred identity costs a wrong log line; replay rewrites
+// bytes, so an inferred identity could serve one conversation the compressed
+// blocks of another. A client that declares no session gets no replay, and
+// says so once rather than guessing for a whole session.
+func (s *Server) sessionReplay(h http.Header, body []byte) *cachestab.SessionReplay {
 	if s.replay == nil {
 		return nil
 	}
-	return s.replay.Begin(sessionKey, body)
+	key, declared := cachestab.DeclaredSessionKey(h)
+	if !declared {
+		slog.Warn("replay is off for this request: the client declared no session id",
+			"event", "replay_no_session_id",
+			"want_header", "x-headroom-session-id or x-claude-code-session-id")
+		return nil
+	}
+	return s.replay.Begin(key, body)
 }
 
 // observeCacheStability runs the two cache-stabilization detectors over the

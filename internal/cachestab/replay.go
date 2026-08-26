@@ -27,9 +27,9 @@ const DefaultReplayCapacity = 256
 //
 // Eviction is FIFO, matching [DriftState]; the same reasoning applies.
 //
-// ponytail: entries are never removed within a session, so a block that
-// scrolls out of the conversation stays in the map until the session is
-// evicted. Bound it per session only if a measurement shows it matters.
+// Within a session, entries are swept by staleness rather than capped by
+// count. See [ReplayStaleTurns] for why, and TestReplayStateMemoryUnderADayOf-
+// Use for the measurement that decided it.
 type ReplayState struct {
 	mu       sync.Mutex
 	capacity int
@@ -37,8 +37,36 @@ type ReplayState struct {
 	order    []string
 }
 
+// ReplayStaleTurns is how many consecutive turns an entry may go unseen before
+// it is swept.
+//
+// A client re-sends every message it still holds on every turn, so a block
+// that is still in the conversation is looked up EVERY turn. An entry nobody
+// asked about for three turns therefore belongs to a block that has scrolled
+// out — compacted away, or dropped by a rolling window — and it will never be
+// looked up again. Keeping it is pure leak.
+//
+// The bound is on staleness rather than on count deliberately: evicting a LIVE
+// entry guarantees a prompt-cache miss on the next turn, which is the exact
+// cost replay exists to avoid. Sweeping a dead one costs nothing.
+//
+// Measured before choosing this (see replay_mem_test.go, distinct payloads):
+// a working day of 50 sessions x 200 blocks holds 10.4 MB, but every slot full
+// and every session heavy — 256 x 1000 — holds 276 MB. Unbounded entries per
+// session was the case a machine running for days would have found.
+const ReplayStaleTurns = 3
+
+// replayEntry is one block's compressed text plus the turn it was last seen.
+type replayEntry struct {
+	text string
+	seen int
+}
+
 // replaySession is one conversation's replay state.
 type replaySession struct {
+	// turn counts this session's requests, and is the clock the staleness
+	// sweep runs on.
+	turn int
 	// sentCount is how many messages this session's PREVIOUS turn carried.
 	// It is the real frozen floor: every message below it has already gone
 	// to the provider and may sit in the provider's cache, so only an
@@ -52,7 +80,21 @@ type replaySession struct {
 	sentCount int
 	// blocks maps ccr.ComputeKey(original) to the compressed text that was
 	// sent in its place.
-	blocks map[string]string
+	blocks map[string]replayEntry
+}
+
+// sweep drops entries no turn within ReplayStaleTurns has asked about.
+// Called under the parent's lock.
+func (s *replaySession) sweep() {
+	cutoff := s.turn - ReplayStaleTurns
+	if cutoff <= 0 {
+		return
+	}
+	for k, e := range s.blocks {
+		if e.seen < cutoff {
+			delete(s.blocks, k)
+		}
+	}
 }
 
 // NewReplayState builds a ReplayState. A capacity of zero or less selects
@@ -87,11 +129,13 @@ func (s *ReplayState) Begin(sessionKey string, body []byte) *SessionReplay {
 			s.order = s.order[1:]
 		}
 		s.order = append(s.order, sessionKey)
-		sess = &replaySession{blocks: make(map[string]string)}
+		sess = &replaySession{blocks: make(map[string]replayEntry)}
 		s.sessions[sessionKey] = sess
 	}
+	sess.turn++
+	sess.sweep()
 
-	h := &SessionReplay{parent: s, sess: sess, floor: sess.sentCount, first: !seen}
+	h := &SessionReplay{parent: s, sess: sess, floor: sess.sentCount, first: !seen, turn: sess.turn}
 	sess.sentCount = count
 	return h
 }
@@ -102,6 +146,7 @@ type SessionReplay struct {
 	sess   *replaySession
 	floor  int
 	first  bool
+	turn   int
 }
 
 // FirstTurn reports whether this session had no state before this turn, which
@@ -123,11 +168,19 @@ func (h *SessionReplay) Floor() int { return h.floor }
 
 // Lookup returns the compressed text this session previously sent in place of
 // the block whose original hashes to originalHash.
+//
+// A hit marks the entry as seen this turn, which is what keeps it out of the
+// staleness sweep: the client is still sending that block.
 func (h *SessionReplay) Lookup(originalHash string) (string, bool) {
 	h.parent.mu.Lock()
 	defer h.parent.mu.Unlock()
-	v, ok := h.sess.blocks[originalHash]
-	return v, ok
+	e, ok := h.sess.blocks[originalHash]
+	if !ok {
+		return "", false
+	}
+	e.seen = h.turn
+	h.sess.blocks[originalHash] = e
+	return e.text, true
 }
 
 // Record remembers that this session sent compressed in place of the block
@@ -135,5 +188,21 @@ func (h *SessionReplay) Lookup(originalHash string) (string, bool) {
 func (h *SessionReplay) Record(originalHash, compressed string) {
 	h.parent.mu.Lock()
 	defer h.parent.mu.Unlock()
-	h.sess.blocks[originalHash] = compressed
+	h.sess.blocks[originalHash] = replayEntry{text: compressed, seen: h.turn}
+}
+
+// Forget drops a block's entry, so the next turn compresses it fresh instead
+// of replaying text whose CCR original the store can no longer resolve.
+func (h *SessionReplay) Forget(originalHash string) {
+	h.parent.mu.Lock()
+	defer h.parent.mu.Unlock()
+	delete(h.sess.blocks, originalHash)
+}
+
+// EntryCount reports how many blocks this session is holding, for tests and
+// for the memory measurement.
+func (h *SessionReplay) EntryCount() int {
+	h.parent.mu.Lock()
+	defer h.parent.mu.Unlock()
+	return len(h.sess.blocks)
 }

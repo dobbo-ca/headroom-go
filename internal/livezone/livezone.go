@@ -130,6 +130,27 @@ type Result struct {
 	TokensAfter  int
 }
 
+// storeResolves reports whether every retrieval marker in replacement can be
+// read back out of the store, and whether the canonical hash still holds the
+// exact original.
+//
+// It is the only check that answers the question a marker asks. Store.Put
+// reports nothing, so a full disk, a revoked file or a capacity eviction is
+// silent; and an accepted block carries TWO marker surfaces — the
+// dispatcher's <<ccr:HASH>> under ComputeKey and the compressor's inline
+// hash= under ComputeKeyMD5 — so checking one proves nothing about the other.
+func storeResolves(store ccr.Store, hash, original, replacement string) bool {
+	if got, ok := store.Get(hash); !ok || got != original {
+		return false
+	}
+	for _, h := range ccr.HashesIn(replacement) {
+		if _, ok := store.Get(h); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // passthrough builds the no-change result for a bail-out path.
 func passthrough(body []byte, reason Reason, frozen int) Result {
 	return Result{Body: body, Applied: false, Reason: reason, FrozenCount: frozen}
@@ -217,10 +238,19 @@ func Dispatch(body []byte, opts Options) Result {
 
 		// The original is stored only now, after the gate accepted, so a
 		// rejected block never leaves an orphan CCR entry. compressBlock
-		// stages the router's own writes for the same reason. Every emitted
-		// marker therefore resolves.
+		// stages the router's own writes for the same reason.
+		//
+		// The store's Put reports nothing, so a full disk, a revoked file
+		// or an eviction is silent. Read the entry back before putting its
+		// marker on the wire: a marker the model cannot dereference is
+		// worse than the bytes it replaced, and with replay on it stays
+		// there for the whole session.
 		if opts.Store != nil && br.cacheKey != "" {
 			opts.Store.Put(br.cacheKey, s.text)
+			if !storeResolves(opts.Store, br.cacheKey, s.text, br.replacement) {
+				outcomes[len(outcomes)-1].Action = "store_unresolvable"
+				continue
+			}
 			// Every later turn in this session must reproduce these exact
 			// bytes for this block, or compressing it here costs a cache
 			// miss per turn instead of saving anything.

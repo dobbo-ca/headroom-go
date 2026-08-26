@@ -181,13 +181,13 @@ func TestFlagUpstreamIsValidatedAndTrimmed(t *testing.T) {
 	}
 }
 
-// Replay mutates bytes inside the cache-frozen prefix, so it is off unless an
-// operator asks for it — and asking must actually work. A flag that parses to
-// nothing ships dead, and this repo has done that before.
-func TestReplayIsOffByDefaultAndOptedInByEnv(t *testing.T) {
+// Replay is ON by default now that its guard rails hold, and the opt-OUT must
+// actually work. A flag that parses to nothing ships dead, and this repo has
+// done that before.
+func TestReplayIsOnByDefaultAndOptedOutByEnv(t *testing.T) {
 	t.Setenv("HEADROOM_PROXY_UPSTREAM", "https://api.anthropic.com")
 
-	for _, v := range []string{"", "off", "false", "0", "no", "disabled", "maybe"} {
+	for _, v := range []string{"off", "false", "0", "no", "disabled", "OFF", " False "} {
 		t.Run("off:"+v, func(t *testing.T) {
 			t.Setenv("HEADROOM_PROXY_REPLAY", v)
 			c, err := Load(Overrides{})
@@ -195,11 +195,13 @@ func TestReplayIsOffByDefaultAndOptedInByEnv(t *testing.T) {
 				t.Fatal(err)
 			}
 			if c.Replay {
-				t.Errorf("HEADROOM_PROXY_REPLAY=%q must leave replay off", v)
+				t.Errorf("HEADROOM_PROXY_REPLAY=%q must turn replay off", v)
 			}
 		})
 	}
-	for _, v := range []string{"enabled", "on", "true", "1", "yes", "ON", " True "} {
+	// Unset is the default, and an unrecognised value must not silently
+	// disable the feature: only the off vocabulary does that.
+	for _, v := range []string{"", "on", "true", "1", "yes", "maybe"} {
 		t.Run("on:"+v, func(t *testing.T) {
 			t.Setenv("HEADROOM_PROXY_REPLAY", v)
 			c, err := Load(Overrides{})
@@ -207,7 +209,7 @@ func TestReplayIsOffByDefaultAndOptedInByEnv(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !c.Replay {
-				t.Errorf("HEADROOM_PROXY_REPLAY=%q must enable replay", v)
+				t.Errorf("HEADROOM_PROXY_REPLAY=%q must leave replay on", v)
 			}
 		})
 	}

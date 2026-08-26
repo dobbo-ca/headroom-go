@@ -148,3 +148,92 @@ func TestReplayStateIsConcurrencySafe(t *testing.T) {
 		t.Errorf("Len() = %d, want 4 distinct sessions", got)
 	}
 }
+
+// GUARD RAIL 3. A client re-sends every block it still holds on every turn, so
+// an entry nobody looks up belongs to a block that has scrolled out. It must
+// be swept, or a proxy running for days holds the whole day.
+func TestReplaySweepsEntriesTheClientStoppedSending(t *testing.T) {
+	s := NewReplayState(4)
+	const key = "claude:abc"
+	body := []byte(`{"messages":[]}`)
+
+	h := s.Begin(key, body)
+	h.Record("aaaaaaaaaaaaaaaaaaaaaaaa", "compressed-a")
+	h.Record("bbbbbbbbbbbbbbbbbbbbbbbb", "compressed-b")
+	if got := h.EntryCount(); got != 2 {
+		t.Fatalf("recorded 2 blocks, holding %d", got)
+	}
+
+	// Keep asking about "a" and never about "b".
+	for turn := 0; turn < ReplayStaleTurns+1; turn++ {
+		h = s.Begin(key, body)
+		if _, ok := h.Lookup("aaaaaaaaaaaaaaaaaaaaaaaa"); !ok {
+			t.Fatalf("turn %d: the live block was swept", turn)
+		}
+	}
+
+	if got := h.EntryCount(); got != 1 {
+		t.Errorf("holding %d entries, want 1: the block the client stopped sending was not swept", got)
+	}
+	if _, ok := h.Lookup("bbbbbbbbbbbbbbbbbbbbbbbb"); ok {
+		t.Error("the stale block is still replayable")
+	}
+}
+
+// Sweeping a LIVE entry guarantees a prompt-cache miss on the next turn, which
+// is the exact cost replay exists to avoid. A block looked up every turn must
+// survive far past the stale window.
+func TestReplayNeverSweepsALiveEntry(t *testing.T) {
+	s := NewReplayState(4)
+	const key = "claude:abc"
+	body := []byte(`{"messages":[]}`)
+
+	h := s.Begin(key, body)
+	h.Record("aaaaaaaaaaaaaaaaaaaaaaaa", "compressed-a")
+	for turn := 0; turn < 10*ReplayStaleTurns; turn++ {
+		h = s.Begin(key, body)
+		got, ok := h.Lookup("aaaaaaaaaaaaaaaaaaaaaaaa")
+		if !ok {
+			t.Fatalf("turn %d: a block looked up every turn was swept", turn)
+		}
+		if got != "compressed-a" {
+			t.Fatalf("turn %d: replayed %q", turn, got)
+		}
+	}
+}
+
+// Forget drops an entry immediately, so a block whose CCR original the store
+// lost is compressed fresh next turn instead of replaying an unresolvable
+// marker every turn.
+func TestForgetDropsAnEntry(t *testing.T) {
+	s := NewReplayState(4)
+	h := s.Begin("claude:abc", []byte(`{"messages":[]}`))
+	h.Record("aaaaaaaaaaaaaaaaaaaaaaaa", "compressed-a")
+	h.Forget("aaaaaaaaaaaaaaaaaaaaaaaa")
+	if _, ok := h.Lookup("aaaaaaaaaaaaaaaaaaaaaaaa"); ok {
+		t.Error("Forget left the entry replayable")
+	}
+}
+
+// Two sessions must not share a slot's entries.
+func TestReplaySweepIsPerSession(t *testing.T) {
+	s := NewReplayState(4)
+	body := []byte(`{"messages":[]}`)
+
+	a := s.Begin("claude:aaa", body)
+	a.Record("aaaaaaaaaaaaaaaaaaaaaaaa", "from-a")
+	b := s.Begin("claude:bbb", body)
+	b.Record("bbbbbbbbbbbbbbbbbbbbbbbb", "from-b")
+
+	if _, ok := b.Lookup("aaaaaaaaaaaaaaaaaaaaaaaa"); ok {
+		t.Error("session b can replay session a's block")
+	}
+	// Turning session b's clock far past the window must not touch a.
+	for i := 0; i < 10; i++ {
+		s.Begin("claude:bbb", body)
+	}
+	a = s.Begin("claude:aaa", body)
+	if _, ok := a.Lookup("aaaaaaaaaaaaaaaaaaaaaaaa"); !ok {
+		t.Error("session a's block was swept by session b's turns")
+	}
+}

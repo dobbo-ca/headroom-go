@@ -9,6 +9,8 @@ import (
 
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
+	"github.com/dobbo-ca/headroom-go/internal/router"
+	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 	"github.com/tidwall/gjson"
 )
 
@@ -355,5 +357,52 @@ func TestReplayNeverSplicesASlotWithNoByteRange(t *testing.T) {
 	}
 	if bytes.Contains(res.Body, []byte("boom")) {
 		t.Fatal("a zero-length slot was spliced at offset 0 and corrupted the body")
+	}
+}
+
+// Not every compressor appends an inline "hash=" marker — log_template does
+// not, and it is the strategy that fired on real Claude Code traffic. Replay
+// must refresh only the entries the replayed text actually names, or it writes
+// a second full copy of every such original under a key no marker points at:
+// an orphan, and the store grows at twice the rate it should.
+func TestReplayRefreshesOnlyTheEntriesTheWireNames(t *testing.T) {
+	original := strings.Repeat("a line of tool output\n", 60)
+	hash := ccr.ComputeKey([]byte(original))
+	// A replayed text carrying ONLY the canonical marker: no hash= anywhere.
+	compressed := "compressed form\n" + ccr.MarkerFor(hash)
+	if strings.Contains(compressed, "hash=") {
+		t.Fatal("the fixture carries an inline marker; it cannot test the orphan case")
+	}
+
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"` + strings.ReplaceAll(original, "\n", "\\n") + `"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"newer"}]}]}`)
+
+	state := cachestab.NewReplayState(4)
+	h := state.Begin("claude:test", body)
+	h.Record(hash, compressed)
+
+	store := newMapStore()
+	res := Dispatch(body, Options{
+		Router:      router.NewDefault(),
+		Store:       store,
+		Tokenizer:   tokenizer.GetTokenizer(DefaultModel),
+		FrozenCount: 2,
+		Replay:      h,
+	})
+	if !res.Applied {
+		t.Fatal("the block was not replayed; this test would prove nothing")
+	}
+
+	// Exactly the canonical entry, and nothing else. The MD5 key of the same
+	// original is the orphan an unconditional refresh would write.
+	if store.Len() != 1 {
+		t.Errorf("the store holds %d entries for one canonical marker", store.Len())
+	}
+	if _, ok := store.Get(ccr.ComputeKeyMD5([]byte(original))); ok {
+		t.Error("replay wrote an MD5-keyed entry that no marker on the wire names")
+	}
+	if got, ok := store.Get(hash); !ok || got != original {
+		t.Error("the canonical entry was not refreshed")
 	}
 }
