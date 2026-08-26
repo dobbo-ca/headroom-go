@@ -111,3 +111,18 @@ func DeclaredSessionKey(h http.Header) (string, bool) {
 	}
 	return "", false
 }
+
+// ClaudeSessionDigest returns the digest a proxy logs for a Claude Code
+// session with the given id — the same value as shortDigest(SessionKey(...))
+// when the client sent x-claude-code-session-id.
+//
+// It exists so a report can join a transcript file, whose NAME is that session
+// id, to the proxy's own records without ever handling a session key. The key
+// itself stays inside this package.
+func ClaudeSessionDigest(sessionID string) string {
+	return shortDigest("claude:" + shortDigest(sessionID))
+}
+
+// Digest exposes the short, log-safe hash of a session key, so a caller that
+// already holds a key can record it without reimplementing the hash.
+func Digest(sessionKey string) string { return shortDigest(sessionKey) }

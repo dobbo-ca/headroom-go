@@ -10,6 +10,7 @@ import (
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	_ "github.com/dobbo-ca/headroom-go/internal/ccr/backends" // registers the store backends
 	"github.com/dobbo-ca/headroom-go/internal/config"
+	"github.com/dobbo-ca/headroom-go/internal/ledger"
 	"github.com/dobbo-ca/headroom-go/internal/paths"
 	"github.com/dobbo-ca/headroom-go/internal/proxy"
 	"github.com/dobbo-ca/headroom-go/internal/router"
@@ -61,6 +62,17 @@ func newProxyCmd() *cobra.Command {
 				return fmt.Errorf("open CCR store: %w", err)
 			}
 
+			// A ledger that will not open costs observability, never a
+			// session: `headroom perf` reports nothing rather than the
+			// proxy refusing to run.
+			var led *ledger.Writer
+			if lp, err := ledger.DefaultPath(); err == nil {
+				if led, err = ledger.Open(lp); err != nil {
+					fmt.Fprintln(os.Stderr, "headroom: no ledger, `headroom perf` will see nothing:", err)
+					led = nil
+				}
+			}
+
 			srv := proxy.New(proxy.Deps{
 				Config:    pcfg,
 				Store:     store,
@@ -68,6 +80,7 @@ func newProxyCmd() *cobra.Command {
 				Tokenizer: tokenizer.GetTokenizer(cfg.Model),
 				Version:   version,
 				CCRPath:   cfg.CCRPath,
+				Ledger:    led,
 			})
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
