@@ -114,14 +114,14 @@ func (s *Server) maybeCompress(r *http.Request, body []byte) ([]byte, *livezone.
 		"frozen_count", res.FrozenCount, "replay", replay != nil,
 		"replay_first_turn", replay != nil && replay.FirstTurn())
 
-	s.record(sessionKey, body, drift, res)
+	s.record(sessionKey, body, drift, res, mode)
 	return res.Body, &res
 }
 
 // record appends this turn to the ledger. It runs AFTER the dispatcher and
 // nothing reads it back, so the timestamp it stamps cannot reach the bytes
 // forwarded upstream and determinism (I4) still holds.
-func (s *Server) record(sessionKey string, body []byte, drift []string, res livezone.Result) {
+func (s *Server) record(sessionKey string, body []byte, drift []string, res livezone.Result, mode policy.AuthMode) {
 	if s.ledger == nil {
 		return
 	}
@@ -148,6 +148,7 @@ func (s *Server) record(sessionKey string, body []byte, drift []string, res live
 		TokensBefore: res.TokensBefore,
 		TokensAfter:  res.TokensAfter,
 		Reason:       string(res.Reason),
+		Mode:         mode.String(),
 		Strategies:   strategies,
 		Replayed:     replayed,
 		Drift:        drift,

@@ -187,3 +187,53 @@ func TestNilLedgerDoesNotBreakForwarding(t *testing.T) {
 		t.Errorf("status = %d with no ledger wired", resp.StatusCode)
 	}
 }
+
+// The ledger must record the auth mode policy.ClassifyHeader assigned, so
+// `headroom perf` can decide which headline to show. Two requests with
+// different User-Agent values must produce different Mode fields.
+func TestLedgerRecordsTheAuthModeItClassified(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"id":"m","type":"message"}`))
+	}))
+	defer up.Close()
+
+	srv := ledgerServer(t, up.URL, path)
+	front := httptest.NewServer(srv.Handler())
+	defer front.Close()
+
+	post := func(ua string) {
+		req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/messages",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	// First turn: a subscription UA (Claude Code CLI).
+	post("claude-cli/1.0.0")
+	// Second turn: no UA, which policy.ClassifyHeader treats as PAYG.
+	post("")
+
+	entries, err := ledger.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	if entries[0].Mode != "subscription" {
+		t.Errorf("claude-cli UA: Mode=%q, want subscription", entries[0].Mode)
+	}
+	if entries[1].Mode != "payg" {
+		t.Errorf("no UA: Mode=%q, want payg", entries[1].Mode)
+	}
+}
