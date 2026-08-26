@@ -100,3 +100,46 @@ func TestPerfWithNoLedger(t *testing.T) {
 		t.Errorf("got:\n%s", out.String())
 	}
 }
+
+// End-to-end: a ledger with mode=subscription must produce the
+// "context-window headroom" headline, not the metered label. This test
+// catches a missing or misspelled JSON tag on Entry.Mode.
+func TestPerfHeadlinesWindowHeadroomForASubscriptionLedger(t *testing.T) {
+	dir := t.TempDir()
+	const sessionID = "aaaa0000-0000-0000-0000-000000000000"
+	digest := cachestab.ClaudeSessionDigest(sessionID)
+
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	line := `{"ts":"2026-08-25T10:00:00Z","session":"` + digest +
+		`","model":"claude-sonnet-5","messages":4,"bytes_in":2000,"bytes_out":1000,` +
+		`"tokens_before":100,"tokens_after":50,"reason":"ok","mode":"subscription"}` + "\n"
+	if err := os.WriteFile(ledgerPath, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tdir := filepath.Join(dir, "projects", "p")
+	if err := os.MkdirAll(tdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	usage := `{"type":"assistant","message":{"usage":{"input_tokens":100,` +
+		`"cache_read_input_tokens":900,"cache_creation_input_tokens":0}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(tdir, sessionID+".jsonl"), []byte(usage), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"perf", "--ledger", ledgerPath, "--transcripts", filepath.Join(dir, "projects")})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("perf: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "context-window headroom") {
+		t.Errorf("subscription ledger did not produce the subscription headline:\n%s", got)
+	}
+	if strings.Contains(got, "what a user actually sees") {
+		t.Errorf("old label leaked into output:\n%s", got)
+	}
+}

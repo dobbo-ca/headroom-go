@@ -103,3 +103,46 @@ func TestConcurrentAppendsAreWholeLines(t *testing.T) {
 		t.Fatalf("read %d entries, want %d — a line was torn", len(got), n)
 	}
 }
+
+// Read must keep entries written before v0.2, which have no mode field.
+// An entry with Mode="" must round-trip, and omitempty must suppress the
+// key when marshalling. This is the backward-compatibility test.
+func TestReadKeepsAnEntryWrittenBeforeTheModeField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// A literal v0.1.1 line with no "mode" key.
+	v011Line := `{"ts":"2026-08-25T10:00:00Z","session":"abc","model":"claude-sonnet-5","messages":4,"bytes_in":100,"bytes_out":90,"tokens_before":200,"tokens_after":100,"reason":"ok"}` + "\n"
+	v02Line := `{"ts":"2026-08-25T10:01:00Z","session":"def","model":"claude-sonnet-5","messages":4,"bytes_in":100,"bytes_out":90,"tokens_before":200,"tokens_after":100,"reason":"ok","mode":"subscription"}` + "\n"
+	if err := os.WriteFile(path, []byte(v011Line+v02Line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("read %d entries, want 2 (one v0.1.1, one v0.2)", len(got))
+	}
+	if got[0].Mode != "" {
+		t.Errorf("v0.1.1 entry: Mode=%q, want empty string", got[0].Mode)
+	}
+	if got[1].Mode != "subscription" {
+		t.Errorf("v0.2 entry: Mode=%q, want subscription", got[1].Mode)
+	}
+
+	// Round-trip: an Entry{Mode: ""} must marshal with no "mode" key.
+	w, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Append(Entry{Session: "ghi", BytesIn: 100, Mode: ""})
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	lastLine := lines[len(lines)-2] // -1 is empty, -2 is the appended line
+	if strings.Contains(lastLine, `"mode"`) {
+		t.Errorf("Entry{Mode:\"\"} marshalled with a mode key: %s", lastLine)
+	}
+}

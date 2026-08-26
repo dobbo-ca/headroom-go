@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/dobbo-ca/headroom-go/internal/ledger"
+	"github.com/dobbo-ca/headroom-go/internal/policy"
 )
 
 // Anthropic's prompt-cache price multipliers, relative to the base input
@@ -36,6 +37,7 @@ type Report struct {
 	DriftTurns      int
 	DriftDims       map[string]int
 	Reasons         map[string]int
+	Modes           map[string]int
 
 	// What the cache did, from Claude Code's own usage records.
 	MatchedSessions  int
@@ -82,9 +84,9 @@ func CacheReadShare(u Usage) float64 {
 }
 
 // WholeBodySaving is the fraction of the bytes headroom removed from what the
-// client tried to send. This is the honest headline: it is measured on real
-// request bodies, not on the content the compressors happened to reach.
-// Returns -1 when nothing was sent.
+// client tried to send. Bytes, not tokens and not money. It is the widest
+// number this report can print and the one to trust least; it is kept because
+// bytes-out is the ground truth of what was sent. Returns -1 when nothing was sent.
 func (r Report) WholeBodySaving() float64 {
 	if r.BytesIn == 0 {
 		return -1
@@ -95,28 +97,49 @@ func (r Report) WholeBodySaving() float64 {
 // TokensRemoved is the token count headroom took out of the blocks it touched.
 func (r Report) TokensRemoved() int { return r.TokensBefore - r.TokensAfter }
 
-// InputCostAvoided estimates the share of input cost headroom avoided.
-//
-// ASSUMPTION, and it is the only one in this report: the tokens headroom
-// removed would have been billed at the same average rate as the tokens that
-// remained in the same sessions. That is a per-session blend of fresh, read
-// and write pricing, so it neither assumes every removed token would have been
-// a cheap cached read nor that it would have been a full-price write.
-//
-// Returns -1 when there is not enough data to say.
-func (r Report) InputCostAvoided() float64 {
-	spent := InputUnits(r.Headroom)
-	total := InputTokens(r.Headroom)
-	if spent <= 0 || total == 0 || r.TokensRemoved() <= 0 {
+// TokensAvoidedShare is the share of input tokens headroom kept out of the
+// requests these sessions sent. It is deliberately price-free: it is the one
+// thing money and window space have in common. The old InputCostAvoided
+// computed exactly this expression and called it cost — the price multipliers
+// cancel, see TestTokensAvoidedShareIgnoresThePriceMix.
+func (r Report) TokensAvoidedShare() float64 {
+	if !r.JoinSound() || r.TokensRemoved() <= 0 {
 		return -1
 	}
-	if !r.JoinSound() {
-		return -1
-	}
-	perToken := spent / float64(total)
-	avoided := float64(r.TokensRemoved()) * perToken
-	return avoided / (spent + avoided)
+	return float64(r.TokensRemoved()) / float64(r.TokensRemoved()+InputTokens(r.Headroom))
 }
+
+// CostRange brackets the share of input cost headroom avoided on a metered
+// plan. The bracket is the whole point: unlike TokensAvoidedShare the
+// multipliers do not cancel here, and which end applies is not observable.
+//
+// Low end: the removed tokens would have been cached reads at 0.1x — true for
+// a block headroom replays turn after turn. High end: a 1-hour cache write at
+// 2.0x — true for the turn a block is first removed, since the fresh pass only
+// ever touches the LATEST user message, content the provider has not seen.
+// The ledger records a replayed BLOCK count, not replayed TOKENS, so the split
+// is not computable and the report gives the range instead of a point.
+func (r Report) CostRange() (low, high float64) {
+	units := InputUnits(r.Headroom)
+	if !r.JoinSound() || r.TokensRemoved() <= 0 || units <= 0 {
+		return -1, -1
+	}
+	at := func(p float64) float64 { a := float64(r.TokensRemoved()) * p; return a / (units + a) }
+	return at(PriceCacheRead), at(PriceCacheWrite1h)
+}
+
+// Metered decides which headline this report leads with.
+//
+// Subscription is the only mode where the code KNOWS there is no per-token
+// bill: it is a first-party CLI harness matched by User-Agent (policy
+// authmode.go:40-50). OAuth deliberately does NOT count — it spans AWS SigV4
+// (authmode.go:19-20), which is metered, and an unknown mode from a pre-v0.2
+// ledger does not count either. A wrong "you have no bill" claim contradicts
+// an invoice; a wrong cost claim only carries the assumption it already states.
+//
+// Returns false (subscription headline) only when ALL turns are subscription.
+// Any mixture, any unknown mode, any pre-v0.2 entry — all treated as metered.
+func (r Report) Metered() bool { return r.Modes[policy.Subscription.String()] < r.Turns }
 
 // JoinSound reports whether the ledger and the usage records plausibly
 // describe the same traffic.
@@ -140,6 +163,7 @@ func Build(entries []ledger.Entry, sessions []Session) Report {
 		Strategies: map[string]int{},
 		DriftDims:  map[string]int{},
 		Reasons:    map[string]int{},
+		Modes:      map[string]int{},
 	}
 
 	seenSession := map[string]bool{}
@@ -151,6 +175,7 @@ func Build(entries []ledger.Entry, sessions []Session) Report {
 		r.TokensAfter += e.TokensAfter
 		r.Replayed += e.Replayed
 		r.Reasons[e.Reason]++
+		r.Modes[e.Mode]++
 		if e.BytesOut < e.BytesIn {
 			r.CompressedTurns++
 		}

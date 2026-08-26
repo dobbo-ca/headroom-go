@@ -23,16 +23,20 @@ type Entry struct {
 	// Session is the SHORT DIGEST of the session key, never the key itself.
 	// `headroom perf` recomputes the same digest from a Claude Code
 	// transcript filename to join the two sources.
-	Session      string   `json:"session"`
-	Model        string   `json:"model"`
-	Messages     int      `json:"messages"`
-	BytesIn      int      `json:"bytes_in"`
-	BytesOut     int      `json:"bytes_out"`
-	TokensBefore int      `json:"tokens_before"`
-	TokensAfter  int      `json:"tokens_after"`
-	Reason       string   `json:"reason"`
-	Strategies   []string `json:"strategies,omitempty"`
-	Replayed     int      `json:"replayed,omitempty"`
+	Session      string `json:"session"`
+	Model        string `json:"model"`
+	Messages     int    `json:"messages"`
+	BytesIn      int    `json:"bytes_in"`
+	BytesOut     int    `json:"bytes_out"`
+	TokensBefore int    `json:"tokens_before"`
+	TokensAfter  int    `json:"tokens_after"`
+	Reason       string `json:"reason"`
+	// Mode is the auth class policy.ClassifyHeader assigned this request.
+	// Absent in ledgers written before v0.2: an entry with no mode is
+	// UNKNOWN, and unknown is treated as metered (see Report.Metered).
+	Mode       string   `json:"mode,omitempty"`
+	Strategies []string `json:"strategies,omitempty"`
+	Replayed   int      `json:"replayed,omitempty"`
 	// Drift lists the axes on which the CLIENT's cached prefix changed
 	// between turns. Observed on the inbound body, so it never reports
 	// headroom's own rewrites.

@@ -22,20 +22,33 @@ func Format(r Report) string {
 	w("WHAT HEADROOM DID\n")
 	w("  turns             %s   (%s compressed)\n", num(r.Turns), num(r.CompressedTurns))
 	w("  sessions          %s\n", num(r.Sessions))
-	w("  bytes sent        %s of %s\n", bytesOf(r.BytesOut), bytesOf(r.BytesIn))
-	w("  whole-body saving %s   <- what a user actually sees\n", pct(r.WholeBodySaving()))
+	if modes := counted(r.Modes); modes != "" {
+		w("  auth modes        %s\n", modes)
+	}
 	if r.TokensRemoved() > 0 {
-		w("  tokens removed    %s of %s reachable   %s\n",
-			num(r.TokensRemoved()), num(r.TokensBefore), pct(ratio(r.TokensRemoved(), r.TokensBefore)))
+		w("  tokens removed    %s of %s in the blocks it rewrote\n",
+			num(r.TokensRemoved()), num(r.TokensBefore))
+	}
+	// The headline share: only when JoinSound() and TokensRemoved() > 0.
+	if share := r.TokensAvoidedShare(); share >= 0 {
+		if r.Metered() {
+			w("  input tokens never sent   %s\n", pct(share))
+		} else {
+			w("  context-window headroom (cumulative)  %s\n", pct(share))
+		}
+	}
+	w("  bytes sent        %s of %s\n", bytesOf(r.BytesOut), bytesOf(r.BytesIn))
+	if saving := r.WholeBodySaving(); saving > 0 {
+		w("  bytes saved       %s   (wire bytes; not tokens, not the bill)\n", pct(saving))
 	}
 	if r.Replayed > 0 {
 		w("  blocks replayed   %s   (re-sent compressed, so the prefix stayed byte-stable)\n", num(r.Replayed))
 	}
-	if len(r.Strategies) > 0 {
-		w("  strategies        %s\n", counted(r.Strategies))
+	if strategies := counted(r.Strategies); strategies != "" {
+		w("  strategies        %s\n", strategies)
 	}
-	if len(r.Reasons) > 0 {
-		w("  outcomes          %s\n", counted(r.Reasons))
+	if outcomes := counted(r.Reasons); outcomes != "" {
+		w("  outcomes          %s\n", outcomes)
 	}
 
 	w("\nWHAT THE CACHE DID          from Claude Code's own usage records\n")
@@ -91,15 +104,21 @@ func verdict(r Report) []string {
 	if saving <= 0 {
 		return []string{"headroom removed nothing from what you sent. It is not earning its place."}
 	}
-	out = append(out, fmt.Sprintf("headroom removed %s of the bytes you sent, over %s turns.",
-		pct(saving), num(r.Turns)))
 
+	// Path A: MatchedSessions == 0. Mode switch is inert here.
 	if r.MatchedSessions == 0 {
-		out = append(out, "The cache effect is unmeasured, so this number is only half an answer.")
+		out = append(out, fmt.Sprintf(
+			"headroom removed %s tokens and %s of the bytes you sent, over %s turns.",
+			num(r.TokensRemoved()), pct(saving), num(r.Turns)))
+		out = append(out, "No transcript joined a ledger session, so there is no denominator: the share "+
+			"that number is of your traffic, and what it was worth, are both withheld.")
 		return out
 	}
 
+	// Path B: !JoinSound(). Mode switch is inert here too.
 	if !r.JoinSound() {
+		out = append(out, fmt.Sprintf("headroom removed %s of the bytes you sent, over %s turns.",
+			pct(saving), num(r.Turns)))
 		out = append(out, fmt.Sprintf(
 			"No cache verdict: headroom removed %s tokens but the matched sessions were billed for only %s input tokens. "+
 				"The ledger and the usage records are not describing the same traffic, so every number that combines them is withheld.",
@@ -107,6 +126,34 @@ func verdict(r Report) []string {
 		return out
 	}
 
+	// Path C/D: sound join. Sentence 1 differs by mode; sentences 3, 4 are shared; sentence 2 is mode-specific.
+	if r.Metered() {
+		// Path C: metered
+		out = append(out, fmt.Sprintf(
+			"headroom kept %s input tokens out of the %s those sessions billed — %s of them.",
+			num(r.TokensRemoved()), num(r.TokensRemoved()+InputTokens(r.Headroom)), pct(r.TokensAvoidedShare())))
+		low, high := r.CostRange()
+		out = append(out, fmt.Sprintf(
+			"What that saved depends on what those tokens would have billed as, and the ledger cannot say: "+
+				"between %s and %s of your input bill. The low end is a block headroom replays every turn, "+
+				"which would have been a cached read at %.1fx; the high end is the turn a block is first removed, "+
+				"which would have been a 1-hour cache write at %.1fx.",
+			pct(low), pct(high), PriceCacheRead, PriceCacheWrite1h))
+	} else {
+		// Path D: subscription
+		out = append(out, fmt.Sprintf(
+			"headroom kept %s input tokens out of the %s pushed through the context window — %s of that traffic.",
+			num(r.TokensRemoved()), num(r.TokensRemoved()+InputTokens(r.Headroom)), pct(r.TokensAvoidedShare())))
+		low, high := r.CostRange()
+		out = append(out, fmt.Sprintf(
+			"Your plan has no per-token bill, so window space is the win, not money. "+
+				"This is a share of cumulative input tokens, not of any single request's window: "+
+				"the ledger records no per-turn context size, so it cannot say how much later a compaction arrives. "+
+				"On a metered plan the same removal would have been worth %s to %s of the input bill.",
+			pct(low), pct(high)))
+	}
+
+	// Sentence 3: cache-read share (shared between both modes)
 	share := CacheReadShare(r.Headroom)
 	base := CacheReadShare(r.Baseline)
 	switch {
@@ -128,13 +175,11 @@ func verdict(r Report) []string {
 		out = append(out, "The unproxied figure is a different set of sessions, not a control: read it as a sanity check, not a measurement.")
 	}
 
-	switch avoided := r.InputCostAvoided(); {
-	case avoided > 0:
-		out = append(out, fmt.Sprintf(
-			"Priced at Anthropic's cache multipliers, that is about %s of input cost avoided, "+
-				"assuming the removed tokens would have billed at the same average rate as the ones that stayed.",
-			pct(avoided)))
-	}
+	// Sentence 4: bytes saved (shared between both modes)
+	out = append(out, fmt.Sprintf(
+		"The same turns sent %s fewer bytes on the wire. That is the larger number and the one that does not bill.",
+		pct(saving)))
+
 	return out
 }
 
@@ -196,7 +241,9 @@ func group(n int64) string {
 func counted(m map[string]int) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
-		keys = append(keys, k)
+		if k != "" {
+			keys = append(keys, k)
+		}
 	}
 	// Most frequent first, name as the tiebreak so the output is stable.
 	sort.Slice(keys, func(i, j int) bool {
