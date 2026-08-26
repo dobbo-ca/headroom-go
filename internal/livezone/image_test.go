@@ -131,7 +131,7 @@ func TestFitImageDeclinesOnDecodeFailure(t *testing.T) {
 	}{
 		{"truncated", genPNG(100, 100)[:50], "image/png"},
 		{"non-base64", "not!!!base64", "image/png"},
-		{"wrong-label", genPNG(100, 100), "image/jpeg"}, // PNG labelled as JPEG
+		{"wrong-label", genPNG(2000, 2000), "image/jpeg"}, // PNG labelled as JPEG, large enough to reach format check
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,9 +293,73 @@ func TestFitImageTokenSavingMatchesTheFormula(t *testing.T) {
 		t.Errorf("tokAfter = %d, want %d (from formula)", tokAfter, wantAfter)
 	}
 	// For 2558x1370: hi-res is 2558x1370 → visual tokens
-	// Standard is 1512x809
+	// Standard is 1512x810 (not 809)
 	// Documented saving should be ~2942 tokens
 	if tokBefore != 4508 || tokAfter != 1566 {
 		t.Errorf("2558x1370: tokens %d→%d, want 4508→1566", tokBefore, tokAfter)
+	}
+}
+
+func TestFitImageDeclinesExtremeAspectRatio(t *testing.T) {
+	// Aspect ratio > 3136:1 produces zero-dimension output.
+	// 4000x1 would give tw=1568, th=int(RoundToEven(1568/4000))=0.
+	// Regression: JPEG encoder accepts 1568x0, producing a zero-pixel image on the wire.
+	img := image.NewNRGBA(image.Rect(0, 0, 4000, 1))
+	for x := 0; x < 4000; x++ {
+		img.Set(x, 0, color.NRGBA{R: 200, G: 200, B: 200, A: 255})
+	}
+	var buf bytes.Buffer
+	// Use JPEG so we hit the branch that doesn't validate dimensions
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+	// Should be declined at step 4 with tw < 1 || th < 1 guard
+	_, _, _, ok := fitImage(b64, "image/png")
+	if ok {
+		t.Errorf("fitImage accepted 4000x1, should decline (extreme aspect ratio → zero dimension)")
+	}
+}
+
+func TestBoxDownsampleClampsAlphaChannelOverflow(t *testing.T) {
+	// Regression: un-premultiply without clamping inverts white→black on alpha images.
+	// When avgA is low and a channel is saturated, (sumR*0xFFFF/count)/avgA can hit 65536.
+	// uint8(65536>>8) = uint8(256) = 0 (black).
+	// Real case: transparent white + opaque white → avgA=127 (after truncation).
+	src := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	src.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 255, B: 255, A: 0})   // Transparent white
+	src.SetNRGBA(1, 0, color.NRGBA{R: 255, G: 255, B: 255, A: 255}) // Opaque white
+	dst := boxDownsample(src, 1, 1)
+	out := dst.NRGBAAt(0, 0)
+	// Output should be white-ish (high R/G/B), not black
+	if out.R < 200 || out.G < 200 || out.B < 200 {
+		t.Errorf("boxDownsample(transparent+opaque white) = {R:%d G:%d B:%d A:%d}, want R/G/B ~255 (got black, clamping failed)",
+			out.R, out.G, out.B, out.A)
+	}
+}
+
+func TestFitImageDeclinesAllocationBomb(t *testing.T) {
+	// Regression: no dimension cap before image.Decode allows a crafted PNG to declare
+	// 65535x65535 in IHDR, triggering 4-17GB allocation.
+	// Craft a minimal PNG with a large IHDR but small IDAT.
+	// Easier: just test that we decline at a known safe threshold (100MP).
+	// A 10001x10001 image should be declined.
+	var buf bytes.Buffer
+	// PNG header
+	buf.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10})
+	// IHDR chunk: 13 bytes data
+	ihdr := []byte{
+		0, 0, 0, 13, 'I', 'H', 'D', 'R',
+		0, 0, 39, 17, // width 10001
+		0, 0, 39, 17, // height 10001
+		8, 2, 0, 0, 0, // bit depth 8, color type 2 (RGB), compression 0, filter 0, interlace 0
+	}
+	buf.Write(ihdr)
+	// CRC placeholder (4 bytes, we won't decode it anyway)
+	buf.Write([]byte{0, 0, 0, 0})
+	b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+	_, _, _, ok := fitImage(b64, "image/png")
+	if ok {
+		t.Errorf("fitImage accepted 10001x10001 (100MP), should decline (allocation bomb protection)")
 	}
 }

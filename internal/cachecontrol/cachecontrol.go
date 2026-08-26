@@ -71,6 +71,26 @@ func ComputeFrozenCount(body []byte) (int, []Warning) {
 			for _, block := range blocks.Array() {
 				marker := block.Get("cache_control")
 				if !marker.IsObject() {
+					// Check if this is a tool_result with nested array content
+					if block.Get("type").String() == "tool_result" {
+						nested := block.Get("content")
+						if nested.IsArray() {
+							for _, elem := range nested.Array() {
+								nestedMarker := elem.Get("cache_control")
+								if !nestedMarker.IsObject() {
+									continue
+								}
+								if i > highest {
+									highest = i
+								}
+								slog.Debug("cache_control marker (nested)",
+									"field", "messages", "index", i, "ttl", nestedMarker.Get("ttl").String())
+								if w, ok := checkTTLOrder(nestedMarker, &seen5m, "messages", i); ok {
+									warns = append(warns, w)
+								}
+							}
+						}
+					}
 					continue
 				}
 				if i > highest {

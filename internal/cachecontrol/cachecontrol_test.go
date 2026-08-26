@@ -294,3 +294,50 @@ func TestObjectMessageContentHasNoBlocks(t *testing.T) {
 		t.Errorf("ComputeFrozenCount = %d, want 0", got)
 	}
 }
+
+// Nested cache_control markers in tool_result content arrays must raise the floor.
+// Regression: the floor computation only walked top-level content, while the
+// dispatcher walked nested arrays, causing a mismatch where nested markers
+// were protected as hot-zone but sat above the floor.
+func TestNestedCacheControlRaisesFloor(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "nested marker in message 0",
+			body: `{"messages":[
+				{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"log","cache_control":{"type":"ephemeral"}}]}]},
+				{"role":"assistant","content":"ok"}
+			]}`,
+			want: 1, // Message 0 is frozen
+		},
+		{
+			name: "nested marker in message 1",
+			body: `{"messages":[
+				{"role":"user","content":"a"},
+				{"role":"assistant","content":"b"},
+				{"role":"user","content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"},"cache_control":{"type":"ephemeral"}}]}]}
+			]}`,
+			want: 3, // Messages 0,1,2 are frozen
+		},
+		{
+			name: "top-level and nested markers both count",
+			body: `{"messages":[
+				{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]},
+				{"role":"assistant","content":"b"},
+				{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"c","cache_control":{"type":"ephemeral"}}]}]}
+			]}`,
+			want: 3,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := ComputeFrozenCount([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("ComputeFrozenCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

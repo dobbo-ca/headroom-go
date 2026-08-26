@@ -105,10 +105,22 @@ func boxDownsample(src image.Image, dw, dh int) *image.NRGBA {
 				avgA := uint16(sumA / uint64(count))
 				var avgR, avgG, avgB uint8
 				if avgA > 0 {
-					// Un-premultiply: (premul * 0xFFFF) / alpha
-					avgR = uint8((sumR * 0xFFFF / uint64(count)) / uint64(avgA) >> 8)
-					avgG = uint8((sumG * 0xFFFF / uint64(count)) / uint64(avgA) >> 8)
-					avgB = uint8((sumB * 0xFFFF / uint64(count)) / uint64(avgA) >> 8)
+					// Un-premultiply: (premul * 0xFFFF) / alpha, clamped to [0,255]
+					rVal := (sumR * 0xFFFF / uint64(count)) / uint64(avgA) >> 8
+					gVal := (sumG * 0xFFFF / uint64(count)) / uint64(avgA) >> 8
+					bVal := (sumB * 0xFFFF / uint64(count)) / uint64(avgA) >> 8
+					if rVal > 255 {
+						rVal = 255
+					}
+					if gVal > 255 {
+						gVal = 255
+					}
+					if bVal > 255 {
+						bVal = 255
+					}
+					avgR = uint8(rVal)
+					avgG = uint8(gVal)
+					avgB = uint8(bVal)
 				}
 				dst.SetNRGBA(dx, dy, color.NRGBA{R: avgR, G: avgG, B: avgB, A: uint8(avgA >> 8)})
 			}
@@ -143,9 +155,18 @@ func fitImage(b64, mediaType string) (newB64 string, before, after int, ok bool)
 		(format == "jpeg" && mediaType != "image/jpeg") {
 		return "", 0, 0, false
 	}
+	// Cap dimensions to prevent allocation bomb (100MP = ~400MB NRGBA)
+	const maxPixels = 100_000_000
+	if int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		return "", 0, 0, false
+	}
 
 	// Step 4: compute target size (standard tier: 1568px, 1568 tokens)
 	tw, th := resizedSize(cfg.Width, cfg.Height, 1568, 1568)
+	if tw < 1 || th < 1 {
+		// Extreme aspect ratio (>3136:1) produces zero-dimension output
+		return "", 0, 0, false
+	}
 	if tw == cfg.Width && th == cfg.Height {
 		// Already within standard tier
 		return "", 0, 0, false
