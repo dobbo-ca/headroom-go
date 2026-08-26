@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dobbo-ca/headroom-go/internal/router"
+	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 )
 
 // A client-wide Timeout would cut long SSE streams mid-response. The deadline
@@ -147,5 +150,45 @@ func TestListenAndServeReturnsListenError(t *testing.T) {
 
 	if err := srv.ListenAndServe(context.Background()); err == nil {
 		t.Error("ListenAndServe returned nil for an unusable listen address")
+	}
+}
+
+// /healthz is the only way another process can find out whether this proxy
+// will emit markers that outlive a turn, and which store they land in.
+// `headroom wrap` refuses to start a session when the answer is "replay on,
+// store unreachable", so a healthz that lies is a session that goes blind.
+func TestHealthzReportsReplayAndStorePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		replay  bool
+		ccrPath string
+	}{
+		{"replay off, in-memory store", false, ""},
+		{"replay on, sqlite store", true, "/var/lib/headroom/ccr.db"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(Deps{
+				Config:    Config{Upstream: "https://upstream.invalid", Replay: tt.replay},
+				Store:     newMapStore(),
+				Router:    router.NewDefault(),
+				Tokenizer: tokenizer.GetTokenizer("claude"),
+				Version:   "test",
+				CCRPath:   tt.ccrPath,
+			})
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+			var got Health
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Replay != tt.replay {
+				t.Errorf("replay = %v, want %v", got.Replay, tt.replay)
+			}
+			if got.CCRPath != tt.ccrPath {
+				t.Errorf("ccr_path = %q, want %q", got.CCRPath, tt.ccrPath)
+			}
+		})
 	}
 }
