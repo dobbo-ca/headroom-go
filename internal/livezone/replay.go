@@ -89,7 +89,7 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 					opts.Replay.Forget(hash)
 					outcomes = append(outcomes, BlockOutcome{
 						MessageIndex: msgIdx, Index: s.blockIndex,
-						BlockType: s.blockType, Action: "store_unresolvable", CacheKey: hash})
+						BlockType: s.blockType, Action: "store_unresolvable", CacheKey: hash, ContentIndex: s.contentIndex})
 					continue
 				}
 			}
@@ -106,6 +106,7 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 				TokensBefore: b,
 				TokensAfter:  a,
 				CacheKey:     hash,
+				ContentIndex: s.contentIndex,
 			})
 			before += b
 			after += a

@@ -111,11 +111,15 @@ type BlockOutcome struct {
 	MessageIndex int
 	Index        int
 	BlockType    string
-	Action       string // "compressed","replayed","hot_zone","below_threshold","no_op","rejected_tokens"
+	Action       string // "compressed","replayed","hot_zone","below_threshold","no_op","rejected_tokens","unreachable","image_resized","image_declined"
 	Strategy     string
 	TokensBefore int
 	TokensAfter  int
 	CacheKey     string
+	// ContentIndex is the block's index inside a tool_result's structured content
+	// array, or -1 when it is not nested. Without it two nested outcomes in one
+	// tool_result are indistinguishable: both carry the outer Index.
+	ContentIndex int
 }
 
 // Result is the outcome of a Dispatch. Body is never nil for a non-nil
@@ -230,11 +234,19 @@ func Dispatch(body []byte, opts Options) Result {
 		switch s.kind {
 		case slotHotZone:
 			outcomes = append(outcomes, BlockOutcome{
-				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "hot_zone", ContentIndex: s.contentIndex})
 			continue
 		case slotBelowThreshold:
 			outcomes = append(outcomes, BlockOutcome{
-				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold"})
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "below_threshold", ContentIndex: s.contentIndex})
+			continue
+		case slotUnreachable:
+			outcomes = append(outcomes, BlockOutcome{
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "unreachable", ContentIndex: s.contentIndex})
+			continue
+		case slotImage:
+			outcomes = append(outcomes, BlockOutcome{
+				MessageIndex: msgIdx, Index: s.blockIndex, BlockType: s.blockType, Action: "image_declined", ContentIndex: s.contentIndex})
 			continue
 		}
 
@@ -248,6 +260,7 @@ func Dispatch(body []byte, opts Options) Result {
 			TokensBefore: br.tokensBefore,
 			TokensAfter:  br.tokensAfter,
 			CacheKey:     br.cacheKey,
+			ContentIndex: s.contentIndex,
 		})
 		if br.action == "rejected_tokens" {
 			// ReasonAllRejected is reserved for blocks that actually failed
