@@ -90,7 +90,9 @@ func (p *Pipeline) Run(content string, ct transform.ContentType, ctx transform.C
 		bytesSaved = saturatingAdd(bytesSaved, out.BytesSaved)
 	}
 
-	// Phase 2: offloads, gated.
+	// Phase 2: offloads, gated, early-stop.
+	// Stop after the first successful offload to prevent compounding (ReadOutline
+	// + TextOffload would delete markers and closing braces).
 	reformatRatio := 1.0
 	if originalLen > 0 {
 		reformatRatio = float64(len(current)) / float64(originalLen)
@@ -111,6 +113,7 @@ func (p *Pipeline) Run(content string, ct transform.ContentType, ctx transform.C
 		steps = append(steps, off.Name())
 		bytesSaved = saturatingAdd(bytesSaved, out.BytesSaved)
 		cacheKeys = append(cacheKeys, out.CacheKey)
+		break // Early-stop: one offload per block
 	}
 
 	return Result{Output: current, BytesSaved: bytesSaved, StepsApplied: steps, CacheKeys: cacheKeys}

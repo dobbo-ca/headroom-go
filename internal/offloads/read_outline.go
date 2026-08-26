@@ -25,6 +25,17 @@ const (
 // Ported from upstream's _RANGE_KEYS (headroom/proxy/interceptors/astgrep.py:51).
 var rangeKeys = []string{"offset", "limit", "line_range", "start_line", "end_line", "ranges"}
 
+// isReadTool reports whether toolName is a Read-family tool. Kept in sync with
+// livezone.isReadTool and detect.ReadOutputIsProtected.
+func isReadTool(toolName string) bool {
+	switch toolName {
+	case "Read", "read_file", "view", "cat",
+		"mcp__filesystem__read_text_file", "mcp__fs__read_text_file":
+		return true
+	}
+	return false
+}
+
 // codeExtensions is the allowlist of file extensions for which outlining is
 // supported. Ported from upstream's _EXT_TO_LANG keys. Go-only in v0, but the
 // allowlist structure is preserved for future expansion and so the gate can
@@ -121,23 +132,28 @@ func (*ReadOutline) EstimateBloat(content string) float32 {
 }
 
 // Apply outlines Go source code by eliding function bodies and keeping signatures.
-// Declines (ErrSkipped) when: range keys present, prior read, no path, non-Go
-// extension, parse error, or no elidable bodies.
+// Declines (ErrSkipped) when: non-Read tool, range keys present, prior read, no path,
+// non-Go extension, parse error, or no elidable bodies.
 func (o *ReadOutline) Apply(content string, ctx transform.CompressionContext, store ccr.Store) (transform.OffloadOutput, error) {
-	// 1. PATH CHECK. Extract file_path from ToolInput. Fail closed: empty
+	// 1. TOOL CHECK. Only Read-family tools return raw file content.
+	if !isReadTool(ctx.ProducingTool) {
+		return transform.OffloadOutput{}, fmt.Errorf("read_outline: not_read_tool (%s): %w", ctx.ProducingTool, transform.ErrSkipped)
+	}
+
+	// 2. PATH CHECK. Extract file_path from ToolInput. Fail closed: empty
 	// ToolInput or no path key → no_path.
 	path := filePathFromToolInput(ctx.ToolInput)
 	if path == "" {
 		return transform.OffloadOutput{}, fmt.Errorf("read_outline: no_path: %w", transform.ErrSkipped)
 	}
 
-	// 2. EXTENSION CHECK. Go-only in v0.
+	// 3. EXTENSION CHECK. Go-only in v0.
 	ext := CodeExtension(path)
 	if ext != ".go" {
 		return transform.OffloadOutput{}, fmt.Errorf("read_outline: not_go (ext=%s): %w", ext, transform.ErrSkipped)
 	}
 
-	// 3. RANGE VETO. Respect explicit line ranges — the model wants those
+	// 4. RANGE VETO. Respect explicit line ranges — the model wants those
 	// specific lines.
 	for _, key := range rangeKeys {
 		if gjson.Get(ctx.ToolInput, key).Exists() {
@@ -145,20 +161,20 @@ func (o *ReadOutline) Apply(content string, ctx transform.CompressionContext, st
 		}
 	}
 
-	// 4. PROGRESSIVE DISCLOSURE. Second read of the same file returns raw.
+	// 5. PROGRESSIVE DISCLOSURE. Second read of the same file returns raw.
 	// PriorReads is computed by blockContext from the toolpairs.Index.
 	if ctx.PriorReads > 0 {
 		return transform.OffloadOutput{}, fmt.Errorf("read_outline: prior_read (count=%d): %w", ctx.PriorReads, transform.ErrSkipped)
 	}
 
-	// 5. OUTLINE. Strip line-number prefixes, parse, elide bodies, emit with
+	// 6. OUTLINE. Strip line-number prefixes, parse, elide bodies, emit with
 	// prefixes intact.
 	outlined, err := outlineGo(content)
 	if err != nil {
 		return transform.OffloadOutput{}, fmt.Errorf("read_outline: %w: %w", err, transform.ErrSkipped)
 	}
 
-	// 6. STORE. Put the original under MD5 key (matching TextOffload).
+	// 7. STORE. Put the original under MD5 key (matching TextOffload).
 	key := ccr.ComputeKeyMD5([]byte(content))
 	store.Put(key, content)
 

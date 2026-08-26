@@ -174,10 +174,12 @@ func blockContext(opts Options, tools map[string]toolpairs.ToolUse, s planSlot) 
 	return ctx
 }
 
-// isReadTool reports whether toolName is a Read-family tool.
+// isReadTool reports whether toolName is a Read-family tool. Kept in sync with
+// offloads.isReadTool and detect.ReadOutputIsProtected.
 func isReadTool(toolName string) bool {
 	switch toolName {
-	case "Read", "read_file", "view", "cat":
+	case "Read", "read_file", "view", "cat",
+		"mcp__filesystem__read_text_file", "mcp__fs__read_text_file":
 		return true
 	}
 	return false

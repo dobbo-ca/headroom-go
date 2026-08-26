@@ -175,7 +175,8 @@ var releasableReadTypes = map[transform.ContentType]bool{
 func ReadOutputIsProtected(toolName, command, filePath string, contentType transform.ContentType) bool {
 	isRead := false
 	switch toolName {
-	case "Read", "read_file", "view":
+	case "Read", "read_file", "view", "cat",
+		"mcp__filesystem__read_text_file", "mcp__fs__read_text_file":
 		isRead = true
 	case "Bash", "bash", "shell", "run_command":
 		isRead = IsReadCommand(command)

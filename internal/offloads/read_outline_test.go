@@ -98,11 +98,12 @@ func TestSecondReadOfSameFileReturnsRaw(t *testing.T) {
 	expectSkipped(t, err, "prior_read")
 }
 
-// 3. TestFrozenPrefixCountsAsDisclosed — tested via PriorReads.
-// (This is already covered by test 2; blockContext computes PriorReads from
-// frozen+live zones, so setting PriorReads=1 simulates a frozen read.)
+// 3. TestFrozenPrefixCountsAsDisclosed — progressive disclosure from cache.
+// When blockContext sees a Read in the frozen prefix (FrozenCount > 0), it
+// increments PriorReads for any later Read of the same file_path. This test
+// verifies that Apply declines when PriorReads=1, as it would if the file
+// was already Read in the frozen prefix.
 func TestFrozenPrefixCountsAsDisclosed(t *testing.T) {
-	// Same as test 2 with PriorReads=1
 	fixture := loadFixture(t, "three_funcs_numbered.txt")
 	input := `{"file_path":"bar.go"}`
 
@@ -206,22 +207,7 @@ func TestNoElidableBodiesDeclines(t *testing.T) {
 	})
 }
 
-// 8. TestI5RejectsNonShrinkingOutline — NOT TESTABLE at Apply level.
-// The I5 gate runs in the pipeline AFTER Apply returns. Apply just returns
-// the outline; the pipeline rejects it if tokens don't decrease.
-// This test is documented as N/A for unit tests.
-func TestI5RejectsNonShrinkingOutline(t *testing.T) {
-	t.Skip("I5 gate runs in pipeline, not in Apply; needs integration test")
-}
-
-// 9. TestBelowThresholdReadIsNotOutlined — NOT TESTABLE at Apply level.
-// The BlockByteThreshold check runs in the pipeline BEFORE Apply is called.
-// This test is documented as N/A for unit tests.
-func TestBelowThresholdReadIsNotOutlined(t *testing.T) {
-	t.Skip("BlockByteThreshold gate runs in pipeline before Apply; needs integration test")
-}
-
-// 10. TestOutlineIsByteIdenticalAcrossRuns — determinism (I4).
+// 8. TestOutlineIsByteIdenticalAcrossRuns — determinism (I4).
 func TestOutlineIsByteIdenticalAcrossRuns(t *testing.T) {
 	fixture := loadFixture(t, "three_funcs_numbered.txt")
 	input := `{"file_path":"example.go"}`
@@ -252,7 +238,7 @@ func TestOutlineIsByteIdenticalAcrossRuns(t *testing.T) {
 	}
 }
 
-// 11. TestOutlineKeepsEveryDefinitionAndItsLineNumber — value proposition.
+// 9. TestOutlineKeepsEveryDefinitionAndItsLineNumber — value proposition.
 func TestOutlineKeepsEveryDefinitionAndItsLineNumber(t *testing.T) {
 	fixture := loadFixture(t, "three_funcs_numbered.txt")
 	input := `{"file_path":"example.go"}`
@@ -280,6 +266,17 @@ func TestOutlineKeepsEveryDefinitionAndItsLineNumber(t *testing.T) {
 		if !strings.Contains(out.Output, sig) {
 			t.Errorf("outline missing signature: %q", sig)
 		}
+	}
+
+	// Verify closing braces survived (M1 mutation)
+	if !strings.Contains(out.Output, "    18\t}") {
+		t.Errorf("outline missing closing brace at line 18")
+	}
+	if !strings.Contains(out.Output, "    38\t}") {
+		t.Errorf("outline missing closing brace at line 38")
+	}
+	if !strings.Contains(out.Output, "    50\t}") {
+		t.Errorf("outline missing closing brace at line 50")
 	}
 }
 
@@ -318,20 +315,7 @@ func TestOutlineOriginalResolvesFromTheStore(t *testing.T) {
 	}
 }
 
-// 13. TestLogOffloadDeclinesCodeFileRead — the leak, closed.
-// This tests the gate change in ReadOutputIsProtected, not ReadOutline directly.
-// Needs integration test or separate gate test.
-func TestLogOffloadDeclinesCodeFileRead(t *testing.T) {
-	t.Skip("Tests ReadOutputIsProtected gate, not ReadOutline.Apply; needs gate test")
-}
-
-// 14. TestLogOffloadStillCompressesRealBuildOutput — over-protection check.
-// Tests that the gate doesn't over-protect. Needs integration test.
-func TestLogOffloadStillCompressesRealBuildOutput(t *testing.T) {
-	t.Skip("Tests gate over-protection, not ReadOutline.Apply; needs integration test")
-}
-
-// 15. TestNoAstGrepBinaryIsIrrelevant — by construction, no ast-grep dependency.
+// 13. TestNoAstGrepBinaryIsIrrelevant — by construction, no ast-grep dependency.
 func TestNoAstGrepBinaryIsIrrelevant(t *testing.T) {
 	// This test is a documentation test: read_outline uses go/parser, not ast-grep.
 	// The outline fires regardless of whether ast-grep exists on PATH.
@@ -358,4 +342,100 @@ func TestNoAstGrepBinaryIsIrrelevant(t *testing.T) {
 	// This is enforced by the implementation not importing os/exec.
 }
 
-// Mutation tests to be added after implementation works.
+// 14. TestNonReadToolDeclines — tool check (fixes F5/verifier B).
+func TestNonReadToolDeclines(t *testing.T) {
+	fixture := loadFixture(t, "three_funcs_numbered.txt")
+	input := `{"file_path":"example.go"}`
+
+	st := store(t)
+	ro := NewReadOutline()
+
+	nonReadTools := []string{"Write", "Edit", "MultiEdit", "Bash", "mcp__fs__write_file", "str_replace_editor", ""}
+	for _, tool := range nonReadTools {
+		t.Run(tool, func(t *testing.T) {
+			ctx := transform.CompressionContext{
+				ProducingTool: tool,
+				ToolInput:     input,
+			}
+			_, err := ro.Apply(fixture, ctx, st)
+			expectSkipped(t, err, "not_read_tool")
+		})
+	}
+}
+
+// 15. TestElisionMarkerIsValidGo — M2 mutation.
+func TestElisionMarkerIsValidGo(t *testing.T) {
+	fixture := loadFixture(t, "three_funcs_numbered.txt")
+	input := `{"file_path":"example.go"}`
+
+	st := store(t)
+	ro := NewReadOutline()
+
+	ctx := transform.CompressionContext{
+		ProducingTool: "Read",
+		ToolInput:     input,
+	}
+	out, err := ro.Apply(fixture, ctx, st)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// Marker must be a valid Go comment
+	if !strings.Contains(out.Output, "// ... (body elided by Headroom") {
+		t.Fatalf("marker not found or invalid")
+	}
+	// Must not be a Python/shell comment
+	if strings.Contains(out.Output, "# ... (body elided") {
+		t.Fatalf("marker is not a Go comment")
+	}
+}
+
+// 16. TestImportsStructConstInterfaceAllSurvive — M6 mutation.
+func TestImportsStructConstInterfaceAllSurvive(t *testing.T) {
+	fixture := loadFixture(t, "rich_declarations.txt")
+	input := `{"file_path":"example.go"}`
+
+	st := store(t)
+	ro := NewReadOutline()
+
+	ctx := transform.CompressionContext{
+		ProducingTool: "Read",
+		ToolInput:     input,
+	}
+	out, err := ro.Apply(fixture, ctx, st)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// Imports
+	if !strings.Contains(out.Output, "import (") {
+		t.Errorf("imports missing")
+	}
+	if !strings.Contains(out.Output, `"fmt"`) {
+		t.Errorf("fmt import missing")
+	}
+
+	// Struct fields
+	if !strings.Contains(out.Output, "Host    string") {
+		t.Errorf("struct field Host missing")
+	}
+	if !strings.Contains(out.Output, "Port    int") {
+		t.Errorf("struct field Port missing")
+	}
+
+	// Const values
+	if !strings.Contains(out.Output, "DefaultHost = \"localhost\"") {
+		t.Errorf("const DefaultHost missing")
+	}
+	if !strings.Contains(out.Output, "DefaultPort = 8080") {
+		t.Errorf("const DefaultPort missing")
+	}
+
+	// Interface methods
+	if !strings.Contains(out.Output, "Handle(c *Config) error") {
+		t.Errorf("interface method Handle missing")
+	}
+	if !strings.Contains(out.Output, "Name() string") {
+		t.Errorf("interface method Name missing")
+	}
+}
