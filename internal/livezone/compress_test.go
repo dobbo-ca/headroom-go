@@ -9,6 +9,7 @@ import (
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/router"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
+	"github.com/dobbo-ca/headroom-go/internal/transform"
 )
 
 // mapStore is a minimal ccr.Store for tests.
@@ -100,7 +101,7 @@ func TestI5RejectsWhenTokensDoNotShrink(t *testing.T) {
 // With no Router wired, compressBlock must decline rather than panic.
 func TestCompressBlockNilRouter(t *testing.T) {
 	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
-	res := compressBlock(strings.Repeat("x", 1000), Options{}, tok)
+	res := compressBlock(strings.Repeat("x", 1000), transform.CompressionContext{}, Options{}, tok)
 	if res.accepted {
 		t.Error("accepted with no Router wired")
 	}
@@ -111,7 +112,7 @@ func TestCompressBlockNilRouter(t *testing.T) {
 // nil Store there would panic rather than raise ok=false.
 func TestCompressBlockNilStoreDeclinesInsteadOfPanicking(t *testing.T) {
 	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
-	res := compressBlock(repetitiveJSONBlock(), Options{Router: router.NewDefault()}, tok)
+	res := compressBlock(repetitiveJSONBlock(), transform.CompressionContext{}, Options{Router: router.NewDefault()}, tok)
 	if res.accepted {
 		t.Error("accepted with no Store wired")
 	}
@@ -124,7 +125,7 @@ func TestCompressBlockNilStoreDeclinesInsteadOfPanicking(t *testing.T) {
 // not be counted as a rejection-by-tokens.
 func TestCompressBlockNoOpWhenOutputEqualsInput(t *testing.T) {
 	tok := tokenizer.EstimatingCounter{CharsPerToken: 4.0}
-	res := compressBlock("unchanged", Options{}, tok)
+	res := compressBlock("unchanged", transform.CompressionContext{}, Options{}, tok)
 	if res.accepted {
 		t.Error("accepted a no-op")
 	}
@@ -163,7 +164,7 @@ func TestCompressBlockMarkerIsInsideTheGatedText(t *testing.T) {
 	store := newMapStore()
 	text := repetitiveJSONBlock()
 
-	res := compressBlock(text, Options{Router: router.NewDefault(), Store: store}, tok)
+	res := compressBlock(text, transform.CompressionContext{}, Options{Router: router.NewDefault(), Store: store}, tok)
 	if !res.accepted {
 		t.Fatalf("router failed to shrink a repetitive JSON array: %+v", res)
 	}

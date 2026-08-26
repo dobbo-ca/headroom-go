@@ -46,6 +46,13 @@ func (c ContentType) String() string {
 type CompressionContext struct {
 	Query       string
 	TokenBudget *int
+	// ProducingTool is the name of the tool whose output this is ("Read",
+	// "Bash", …), or "" when unknown. A transform needs it to tell raw file
+	// content — which must stay byte-exact — from derived output.
+	ProducingTool string
+	// ToolCommand is the shell command for a Bash-family tool, or "". A
+	// `cat`/`sed -n` of a file is a read even though the tool is Bash.
+	ToolCommand string
 }
 
 // Sentinel errors. ALL mean "skip this transform, continue the pipeline,

@@ -17,6 +17,8 @@ import (
 	"github.com/dobbo-ca/headroom-go/internal/policy"
 	"github.com/dobbo-ca/headroom-go/internal/router"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
+	"github.com/dobbo-ca/headroom-go/internal/toolpairs"
+	"github.com/dobbo-ca/headroom-go/internal/transform"
 	"github.com/tidwall/gjson"
 )
 
@@ -130,6 +132,23 @@ type Result struct {
 	TokensAfter  int
 }
 
+// blockContext builds the per-block compression context, resolving the block's
+// tool_use_id to the tool that produced it. An unresolvable id yields an empty
+// producer, which every gate treats as "unknown, do not assume it is safe".
+func blockContext(opts Options, tools map[string]toolpairs.ToolUse, s planSlot) transform.CompressionContext {
+	ctx := transform.CompressionContext{Query: opts.Query}
+	if s.toolUseID == "" {
+		return ctx
+	}
+	u, ok := tools[s.toolUseID]
+	if !ok {
+		return ctx
+	}
+	ctx.ProducingTool = u.Name
+	ctx.ToolCommand = gjson.Get(u.Input, "command").String()
+	return ctx
+}
+
 // storeResolves reports whether every retrieval marker in replacement can be
 // read back out of the store, and whether the canonical hash still holds the
 // exact original.
@@ -182,6 +201,11 @@ func Dispatch(body []byte, opts Options) Result {
 		tok = tokenizer.GetTokenizer(DefaultModel)
 	}
 
+	// The producing tool is resolved from a single whole-body index. A
+	// transform cannot tell raw file content from derived output without it,
+	// and nothing inside a tool_result says which tool produced it.
+	tools := toolpairs.Index(body)
+
 	// Replay runs FIRST and over the whole conversation. A block this
 	// session already compressed must be reproduced wherever it now sits,
 	// or the prefix the provider cached no longer matches what arrives.
@@ -214,7 +238,7 @@ func Dispatch(body []byte, opts Options) Result {
 			continue
 		}
 
-		br := compressBlock(s.text, opts, tok)
+		br := compressBlock(s.text, blockContext(opts, tools, s), opts, tok)
 		outcomes = append(outcomes, BlockOutcome{
 			MessageIndex: msgIdx,
 			Index:        s.blockIndex,

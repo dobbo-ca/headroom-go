@@ -31,7 +31,10 @@ import (
 )
 
 type inBlock struct {
-	Tool   string `json:"tool"`
+	Tool string `json:"tool"`
+	// Cmd is the shell command for a Bash-family tool. The read-protection
+	// gate needs it: `cat foo.rb` is a file read even though the tool is Bash.
+	Cmd    string `json:"cmd"`
 	Origin string `json:"origin"`
 	Sha    string `json:"sha"`
 	Len    int    `json:"len"`
@@ -54,14 +57,33 @@ type outBlock struct {
 // corpusBody wraps one block as the sole tool_result of the latest user
 // message. This is the honest benchmark: a real block, at FrozenCount 0, on the
 // only surface the dispatcher can reach.
-func corpusBody(text string) []byte {
+func corpusBody(text string) []byte { return corpusBodyFor(text, "", "") }
+
+// corpusBodyFor also carries the tool_use that PRODUCED the block, so the
+// dispatcher can resolve the producing tool. Without it every block looks
+// like it came from an unknown tool and the read-protection gate never fires —
+// which measures an upper bound the production path would never reach.
+func corpusBodyFor(text, tool, command string) []byte {
 	quoted, err := json.Marshal(text)
+	if err != nil {
+		return nil
+	}
+	input := `{}`
+	if command != "" {
+		c, err := json.Marshal(command)
+		if err != nil {
+			return nil
+		}
+		input = `{"command":` + string(c) + `}`
+	}
+	name, err := json.Marshal(tool)
 	if err != nil {
 		return nil
 	}
 	return []byte(`{"model":"claude-sonnet-5","messages":[` +
 		`{"role":"user","content":[{"type":"text","text":"go"}]},` +
-		`{"role":"assistant","content":[{"type":"text","text":"ack"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":` +
+		string(name) + `,"input":` + input + `}]},` +
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":` +
 		string(quoted) + `}]}]}`)
 }
@@ -122,7 +144,7 @@ func TestCorpusClassify(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		res := Dispatch(corpusBody(b.Text), Options{
+		res := Dispatch(corpusBodyFor(b.Text, b.Tool, b.Cmd), Options{
 			Policy:      policy.ForMode(policy.PAYG),
 			Router:      rt,
 			Store:       store,
