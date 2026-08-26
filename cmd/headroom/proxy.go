@@ -4,17 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
-	"github.com/dobbo-ca/headroom-go/internal/ccr"
-	_ "github.com/dobbo-ca/headroom-go/internal/ccr/backends" // registers the store backends
 	"github.com/dobbo-ca/headroom-go/internal/config"
-	"github.com/dobbo-ca/headroom-go/internal/ledger"
-	"github.com/dobbo-ca/headroom-go/internal/paths"
 	"github.com/dobbo-ca/headroom-go/internal/proxy"
-	"github.com/dobbo-ca/headroom-go/internal/router"
-	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 	"github.com/spf13/cobra"
 )
 
@@ -52,36 +45,10 @@ func newProxyCmd() *cobra.Command {
 				return nil
 			}
 
-			if cfg.CCRPath != "" {
-				if err := paths.EnsureDir(filepath.Dir(cfg.CCRPath)); err != nil {
-					return fmt.Errorf("create CCR directory: %w", err)
-				}
-			}
-			store, err := ccr.FromConfig(cfg.BackendConfig())
+			srv, err := newProxyServer(pcfg, cfg)
 			if err != nil {
-				return fmt.Errorf("open CCR store: %w", err)
+				return err
 			}
-
-			// A ledger that will not open costs observability, never a
-			// session: `headroom perf` reports nothing rather than the
-			// proxy refusing to run.
-			var led *ledger.Writer
-			if lp, err := ledger.DefaultPath(); err == nil {
-				if led, err = ledger.Open(lp); err != nil {
-					fmt.Fprintln(os.Stderr, "headroom: no ledger, `headroom perf` will see nothing:", err)
-					led = nil
-				}
-			}
-
-			srv := proxy.New(proxy.Deps{
-				Config:    pcfg,
-				Store:     store,
-				Router:    router.NewDefault(),
-				Tokenizer: tokenizer.GetTokenizer(cfg.Model),
-				Version:   version,
-				CCRPath:   cfg.CCRPath,
-				Ledger:    led,
-			})
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
