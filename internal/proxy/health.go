@@ -6,10 +6,25 @@ import (
 	"time"
 )
 
+// Health is the /healthz body. It reports the two settings a caller must know
+// before it can trust the proxy with a session: whether replay is on, and
+// which CCR store the markers will land in. `headroom wrap` reads both to
+// decide whether it can wire an MCP server onto the same store.
+type Health struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+	Replay  bool   `json:"replay"`
+	// CCRPath is the SQLite CCR file, or "" when the store is in memory and
+	// therefore unreachable from any other process.
+	CCRPath string `json:"ccr_path"`
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"version": s.deps.Version,
+	writeJSON(w, http.StatusOK, Health{
+		Status:  "ok",
+		Version: s.deps.Version,
+		Replay:  s.replay != nil,
+		CCRPath: s.deps.CCRPath,
 	})
 }
 

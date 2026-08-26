@@ -67,6 +67,7 @@ func newProxyCmd() *cobra.Command {
 				Router:    router.NewDefault(),
 				Tokenizer: tokenizer.GetTokenizer(cfg.Model),
 				Version:   version,
+				CCRPath:   cfg.CCRPath,
 			})
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)

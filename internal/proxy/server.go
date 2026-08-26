@@ -25,6 +25,11 @@ type Deps struct {
 	Router    *router.Router
 	Tokenizer tokenizer.Tokenizer
 	Version   string
+	// CCRPath is the SQLite CCR file backing Store, or "" when the store is
+	// in memory. It is reported on /healthz so a caller can confirm that a
+	// separate `headroom mcp serve` will read the same markers this proxy
+	// writes. Nothing in the request path reads it.
+	CCRPath string
 }
 
 // Server is the headroom proxy.

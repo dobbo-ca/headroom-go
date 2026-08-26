@@ -1,14 +1,24 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/dobbo-ca/headroom-go/internal/ccr"
+	_ "github.com/dobbo-ca/headroom-go/internal/ccr/backends" // registers the store backends
 	"github.com/dobbo-ca/headroom-go/internal/config"
+	"github.com/dobbo-ca/headroom-go/internal/paths"
+	"github.com/dobbo-ca/headroom-go/internal/proxy"
+	"github.com/dobbo-ca/headroom-go/internal/router"
+	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 	"github.com/spf13/cobra"
 )
 
@@ -17,13 +27,27 @@ type agentSpec struct {
 	Binary  string
 	EnvVar  string
 	URLPath string
+	// Upstream is the API this agent talks to, used only when neither
+	// --upstream nor HEADROOM_PROXY_UPSTREAM says otherwise. Without it
+	// `headroom wrap claude` is not one command, it is two.
+	Upstream string
+	// MCPConfigFlag is the flag this agent accepts an inline MCP server
+	// definition on. Empty means headroom cannot hand this agent its
+	// retrieval tool, so the model cannot dereference a <<ccr:HASH>>.
+	MCPConfigFlag string
 }
 
 // agents is the supported set. Keep it small and explicit; adding one is a
-// three-field table row, not a plugin system.
+// table row, not a plugin system.
 var agents = map[string]agentSpec{
-	"claude": {Binary: "claude", EnvVar: "ANTHROPIC_BASE_URL", URLPath: ""},
-	"codex":  {Binary: "codex", EnvVar: "OPENAI_BASE_URL", URLPath: "/v1"},
+	"claude": {
+		Binary: "claude", EnvVar: "ANTHROPIC_BASE_URL", URLPath: "",
+		Upstream: "https://api.anthropic.com", MCPConfigFlag: "--mcp-config",
+	},
+	"codex": {
+		Binary: "codex", EnvVar: "OPENAI_BASE_URL", URLPath: "/v1",
+		Upstream: "https://api.openai.com",
+	},
 }
 
 func agentSpecFor(name string) (agentSpec, bool) {
@@ -38,14 +62,28 @@ func agentBaseURL(spec agentSpec, base string) string {
 	return strings.TrimRight(base, "/") + spec.URLPath
 }
 
-// proxyHealthy reports whether a headroom proxy answers at baseURL.
-func proxyHealthy(client *http.Client, baseURL string) bool {
+// probeProxy reads /healthz. The second return is false when no headroom
+// proxy answers at baseURL.
+func probeProxy(client *http.Client, baseURL string) (proxy.Health, bool) {
 	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/healthz")
 	if err != nil {
-		return false
+		return proxy.Health{}, false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return proxy.Health{}, false
+	}
+	var h proxy.Health
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return proxy.Health{}, false
+	}
+	return h, true
+}
+
+// proxyHealthy reports whether a headroom proxy answers at baseURL.
+func proxyHealthy(client *http.Client, baseURL string) bool {
+	_, ok := probeProxy(client, baseURL)
+	return ok
 }
 
 // waitForProxy polls /healthz until it answers or timeout elapses.
@@ -68,9 +106,9 @@ func newWrapCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wrap <agent> [args...]",
 		Short: "Run an agent CLI through the headroom proxy",
-		Long: "Starts the headroom proxy if it is not already running, points the\n" +
-			"agent's base URL at it, and launches the agent.\n\nSupported agents: " +
-			supportedAgents(),
+		Long: "Starts the headroom proxy, points the agent's base URL at it, gives the\n" +
+			"agent a headroom MCP server on the same CCR store, and launches the agent.\n" +
+			"Both stop when the agent exits.\n\nSupported agents: " + supportedAgents(),
 		Args:          cobra.MinimumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -87,14 +125,49 @@ func newWrapCmd() *cobra.Command {
 			base := cfg.ProxyURL
 			client := &http.Client{Timeout: 2 * time.Second}
 
-			if !proxyHealthy(client, base) {
-				if err := spawnProxy(upstream); err != nil {
+			// storePath and replayOn must describe the proxy that will
+			// actually serve this session, which is not always the one
+			// this process would have configured.
+			storePath, replayOn := cfg.CCRPath, false
+
+			if h, running := probeProxy(client, base); running {
+				storePath, replayOn = h.CCRPath, h.Replay
+				fmt.Fprintf(os.Stderr, "headroom: reusing the proxy already listening at %s\n", base)
+			} else {
+				pcfg, err := proxyConfigFor(spec, base, upstream)
+				if err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "headroom: started proxy at %s\n", base)
+				replayOn = pcfg.Replay
+				stop, err := startProxy(cmd.Context(), pcfg, cfg)
+				if err != nil {
+					return err
+				}
+				// The proxy is a goroutine in THIS process, so it cannot
+				// outlive the agent and cannot die behind its back.
+				defer stop()
 				if err := waitForProxy(client, base, 45*time.Second); err != nil {
 					return err
 				}
+				fmt.Fprintf(os.Stderr, "headroom: proxy listening on %s -> %s\n", pcfg.Listen, pcfg.Upstream)
+			}
+
+			mcpArgs, blocked := mcpFlags(spec, storePath, base)
+			switch {
+			case blocked == "":
+				fmt.Fprintf(os.Stderr, "headroom: MCP retrieval wired to %s\n", storePath)
+			case replayOn:
+				// Fail CLOSED. With replay on, every marker headroom
+				// writes stays on the wire for the rest of the session,
+				// so an agent that cannot dereference one is blind for
+				// the whole session rather than for a single turn.
+				return fmt.Errorf("replay is on but headroom cannot give %s its retrieval tool: %s\n"+
+					"The model would see <<ccr:HASH>> markers it cannot resolve for the whole session.\n"+
+					"Set HEADROOM_PROXY_REPLAY=off to run without replay", spec.Binary, blocked)
+			default:
+				// Fail OPEN. Without replay a marker survives one turn.
+				fmt.Fprintf(os.Stderr,
+					"headroom: warning: no retrieval tool for %s: %s\n", spec.Binary, blocked)
 			}
 
 			bin, err := exec.LookPath(spec.Binary)
@@ -102,7 +175,7 @@ func newWrapCmd() *cobra.Command {
 				return fmt.Errorf("cannot find %q on PATH: %w", spec.Binary, err)
 			}
 
-			agentCmd := exec.Command(bin, args[1:]...)
+			agentCmd := exec.Command(bin, append(mcpArgs, args[1:]...)...)
 			agentCmd.Env = append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
 			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 			return agentCmd.Run()
@@ -111,27 +184,83 @@ func newWrapCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&upstream, "upstream", "",
 		"upstream API base URL for a proxy this command starts (env HEADROOM_PROXY_UPSTREAM)")
+	// Everything after the agent name belongs to the agent. Without this,
+	// `headroom wrap claude -p 'say ok'` dies on wrap's own flag parser and
+	// the user has to learn to type a "--" separator.
+	cmd.Flags().SetInterspersed(false)
 	return cmd
 }
 
-// spawnProxy starts `headroom proxy` as a detached child using this same
-// executable, so the wrapped agent does not need headroom on its PATH. It is a
-// variable so tests can exercise the start-the-proxy branch without spawning a
-// second process.
-var spawnProxy = func(upstream string) error {
+// proxyConfigFor resolves the configuration for a proxy wrap starts itself.
+//
+// The listen address comes from HEADROOM_PROXY_URL rather than from
+// HEADROOM_PROXY_LISTEN, because wrap has to listen exactly where it points
+// the agent. Honouring both would let the two settings disagree and produce a
+// proxy nobody talks to.
+func proxyConfigFor(spec agentSpec, base, upstream string) (proxy.Config, error) {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return proxy.Config{}, fmt.Errorf("wrap: proxy URL %q has no host", base)
+	}
+	if upstream == "" && os.Getenv("HEADROOM_PROXY_UPSTREAM") == "" {
+		upstream = spec.Upstream
+	}
+	return proxy.Load(proxy.Overrides{Upstream: upstream, Listen: u.Host})
+}
+
+// startProxy runs the proxy in this process and returns a function that stops
+// it and waits for the listener to drain.
+func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func(), error) {
+	if cfg.CCRPath != "" {
+		if err := paths.EnsureDir(filepath.Dir(cfg.CCRPath)); err != nil {
+			return nil, fmt.Errorf("create CCR directory: %w", err)
+		}
+	}
+	store, err := ccr.FromConfig(cfg.BackendConfig())
+	if err != nil {
+		return nil, fmt.Errorf("open CCR store: %w", err)
+	}
+	srv := proxy.New(proxy.Deps{
+		Config:    pcfg,
+		Store:     store,
+		Router:    router.NewDefault(),
+		Tokenizer: tokenizer.GetTokenizer(cfg.Model),
+		Version:   version,
+		CCRPath:   cfg.CCRPath,
+	})
+
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.ListenAndServe(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "headroom: proxy stopped:", err)
+		}
+	}()
+	return func() { cancel(); <-done }, nil
+}
+
+// mcpFlags builds the agent flags that point it at `headroom mcp serve` on
+// storePath. The second return is empty on success and otherwise says, in one
+// clause, why headroom cannot wire the tool.
+func mcpFlags(spec agentSpec, storePath, proxyURL string) (args []string, blocked string) {
+	if spec.MCPConfigFlag == "" {
+		return nil, fmt.Sprintf("%s takes no inline MCP configuration flag", spec.Binary)
+	}
+	if storePath == "" {
+		return nil, "the CCR store is in memory, so the proxy and the MCP server cannot share it " +
+			"(set HEADROOM_CCR_BACKEND=sqlite)"
+	}
 	self, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate the headroom executable: %w", err)
+		return nil, "cannot locate the headroom executable: " + err.Error()
 	}
-	args := []string{"proxy"}
-	if upstream != "" {
-		args = append(args, "--upstream", upstream)
+	blob, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"headroom": map[string]any{
+		"command": self,
+		"args":    []string{"mcp", "serve", "--ccr-path", storePath, "--proxy-url", proxyURL},
+	}}})
+	if err != nil {
+		return nil, "encode the MCP configuration: " + err.Error()
 	}
-	proc := exec.Command(self, args...)
-	proc.Env = os.Environ()
-	proc.Stdout, proc.Stderr = os.Stderr, os.Stderr
-	if err := proc.Start(); err != nil {
-		return fmt.Errorf("start the headroom proxy: %w", err)
-	}
-	return nil
+	return []string{spec.MCPConfigFlag, string(blob)}, ""
 }
