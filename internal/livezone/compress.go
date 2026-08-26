@@ -47,7 +47,7 @@ func injectCCRMarker(original, compressed string, store ccr.Store) (string, stri
 //
 // The marker is injected BEFORE the gate on purpose: it costs tokens, so the
 // decision about whether compression was worthwhile must account for it.
-func compressBlock(text string, opts Options, tok tokenizer.Tokenizer) blockResult {
+func compressBlock(text string, ctx transform.CompressionContext, opts Options, tok tokenizer.Tokenizer) blockResult {
 	if opts.Router == nil {
 		return blockResult{action: "no_op"}
 	}
@@ -65,7 +65,7 @@ func compressBlock(text string, opts Options, tok tokenizer.Tokenizer) blockResu
 	// Buffer those writes so a rejected block leaves no orphan entry: the
 	// staged originals reach the real store only once the gate accepts.
 	staged := &stagingStore{backing: opts.Store}
-	res := opts.Router.Compress(text, transform.CompressionContext{Query: opts.Query}, staged)
+	res := opts.Router.Compress(text, ctx, staged)
 	if res.Output == "" || res.Output == text {
 		return blockResult{action: "no_op"}
 	}

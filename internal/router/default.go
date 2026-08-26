@@ -18,7 +18,13 @@ import (
 // Registration order (= run order) matches upstream offloads/mod.rs:
 //   - reformats: JsonMinifier ([JsonArray]) -> LogTemplate ([BuildOutput])
 //   - offloads:  DiffNoise ([GitDiff]) -> DiffOffload ([GitDiff]) ->
-//     JsonOffload ([JsonArray]) -> LogOffload ([BuildOutput])
+//     JsonOffload ([JsonArray]) -> LogOffload ([BuildOutput]) ->
+//     TextOffload ([PlainText])
+//
+// TextOffload has no upstream counterpart in this position: upstream reaches
+// its TextCrusher through the ContentRouter's PlainText -> TEXT strategy. The
+// effect is the same, and before it the PlainText bucket had no compressor at
+// all — 34.9% of a real 171.9 MB corpus, reached by nothing.
 func NewDefault() *Router {
 	p := pipeline.NewBuilder().
 		WithReformat(reformats.JsonMinifier{}).
@@ -27,6 +33,7 @@ func NewDefault() *Router {
 		WithOffload(offloads.NewDiffOffload(compress.NewDiffCompressor())).
 		WithOffload(offloads.NewJsonOffloadWith(smartcrusher.NewSmartCrusher(smartcrusher.DefaultConfig()))).
 		WithOffload(offloads.NewLogOffload(compress.NewLogCompressor())).
+		WithOffload(offloads.NewTextOffload(compress.NewTextCrusher(compress.DefaultTextCrusherConfig()))).
 		Build()
 	return New(p)
 }

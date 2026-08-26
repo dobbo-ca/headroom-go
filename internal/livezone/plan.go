@@ -32,6 +32,11 @@ type planSlot struct {
 	text       string
 	start      int
 	end        int
+	// toolUseID links a tool_result back to the tool_use that produced it.
+	// Empty for any other block type. The dispatcher resolves it against a
+	// whole-body index to learn the PRODUCING TOOL, which is the only way a
+	// transform can tell raw file content from derived output.
+	toolUseID string
 }
 
 // isHotZone reports whether a block type is cache-hot.
@@ -134,7 +139,11 @@ func planBlocks(body string, msgIdx int) []planSlot {
 		if !ok {
 			continue
 		}
-		slots = append(slots, classify(i, blockType, start, end, text, slotCompressible))
+		slot := classify(i, blockType, start, end, text, slotCompressible)
+		if blockType == "tool_result" {
+			slot.toolUseID = block.Get("tool_use_id").String()
+		}
+		slots = append(slots, slot)
 	}
 	return slots
 }
