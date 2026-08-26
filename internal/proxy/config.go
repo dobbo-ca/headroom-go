@@ -33,12 +33,24 @@ type Config struct {
 	// prefix keeps matching. It is what makes compressing anything the
 	// client re-sends worth doing at all.
 	//
-	// OFF by default, and deliberately so: with replay on, the model no
-	// longer sees its own earlier tool results and can only recover them
-	// by calling headroom_retrieve. That needs `headroom mcp serve`
-	// running against the same CCR store. Turning this on without the MCP
-	// server leaves the model looking at <<ccr:HASH>> markers it cannot
-	// dereference, for the whole session rather than for one turn.
+	// ON by default since the guard rails below could be demonstrated.
+	// Set HEADROOM_PROXY_REPLAY=off to disable.
+	//
+	// It was off because turning it on without an MCP server left the model
+	// looking at <<ccr:HASH>> markers it could not dereference, for a whole
+	// session rather than one turn. `headroom wrap` now brings that server
+	// up on the same store and REFUSES to start a session it cannot wire,
+	// so the failure mode the opt-in guarded against no longer reaches a
+	// user by accident.
+	//
+	// Three things hold it up, and each has a test that fails without it:
+	//
+	//  1. A client that declares no session id gets no replay at all. The
+	//     inferred identities are per-tenant, not per-conversation.
+	//  2. A marker whose original the store cannot hand back never goes on
+	//     the wire, in either marker surface.
+	//  3. Entries are swept once the client stops re-sending their block,
+	//     so a proxy running for days holds the working set, not the day.
 	Replay bool
 }
 
@@ -51,9 +63,6 @@ type Overrides struct {
 // offValues disable a boolean setting. Same vocabulary the rest of the
 // project uses, so operators do not need a second one.
 var offValues = map[string]bool{"disabled": true, "off": true, "false": true, "0": true, "no": true}
-
-// onValues enable a setting that is off by default. Mirror of offValues.
-var onValues = map[string]bool{"enabled": true, "on": true, "true": true, "1": true, "yes": true}
 
 // Load resolves the proxy configuration with flag > env > default precedence.
 func Load(ov Overrides) (Config, error) {
@@ -90,7 +99,7 @@ func Load(ov Overrides) (Config, error) {
 	c.DialTimeout = defaultDialTimeout
 
 	c.Compress = !offValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_COMPRESS")))]
-	c.Replay = onValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_REPLAY")))]
+	c.Replay = !offValues[strings.ToLower(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_REPLAY")))]
 	return c, nil
 }
 

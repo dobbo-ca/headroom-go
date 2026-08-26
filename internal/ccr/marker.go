@@ -37,3 +37,32 @@ func ParseMarker(s string) (hash string, ok bool) {
 	}
 	return m[1], true
 }
+
+// hashesRe matches every retrieval hash a compressed block can name. Two
+// surfaces exist and are intentionally not unified: the canonical <<ccr:HASH>>
+// markers the live-zone dispatcher writes (in all three shapes), and the
+// "hash=HEX" form the heuristic compressors and offload transforms write
+// inline for upstream parity. Both keys are exactly 24 lowercase hex chars.
+var hashesRe = regexp.MustCompile(`(?:<<ccr:|hash=)([0-9a-f]{24})`)
+
+// HashesIn returns every retrieval hash the text names, deduped, in the order
+// they appear.
+//
+// Callers use it to answer one question: can the model dereference everything
+// this block is about to put on the wire? Checking only the canonical marker
+// cannot answer it, because an accepted block carries both surfaces.
+func HashesIn(s string) []string {
+	ms := hashesRe.FindAllStringSubmatch(s, -1)
+	if ms == nil {
+		return nil
+	}
+	out := make([]string, 0, len(ms))
+	seen := make(map[string]bool, len(ms))
+	for _, m := range ms {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}

@@ -87,3 +87,27 @@ func conversationDiscriminator(body []byte) string {
 	sum.Write(canonical)
 	return hex.EncodeToString(sum.Sum(nil))[:16]
 }
+
+// DeclaredSessionKey returns a session key ONLY when the client declared its
+// own conversation id, and reports false otherwise.
+//
+// [SessionKey] always returns something, because drift detection is
+// observation and a wrong guess there costs a log line. Replay is different:
+// it puts bytes on the wire. Its identity has to be one the CLIENT owns.
+//
+// The inferred arms — credential, or client address plus User-Agent, each
+// folded with a fingerprint of the first message — identify a TENANT, not a
+// conversation, and the address arm rotates per TCP connection. Replaying
+// against an identity like that is a guess: at best it silently does nothing,
+// and at worst two conversations share a slot and one is served the other's
+// compressed blocks. Returning false makes the no-op explicit and auditable
+// instead of accidental.
+func DeclaredSessionKey(h http.Header) (string, bool) {
+	if sid := h.Get("X-Headroom-Session-Id"); sid != "" {
+		return "session:" + shortDigest(sid), true
+	}
+	if sid := h.Get("X-Claude-Code-Session-Id"); sid != "" {
+		return "claude:" + shortDigest(sid), true
+	}
+	return "", false
+}

@@ -1,6 +1,8 @@
 package livezone
 
 import (
+	"strings"
+
 	"github.com/dobbo-ca/headroom-go/internal/ccr"
 	"github.com/dobbo-ca/headroom-go/internal/tokenizer"
 	"github.com/tidwall/gjson"
@@ -53,8 +55,43 @@ func replayAll(bodyStr string, root gjson.Result, opts Options, tok tokenizer.To
 			// every replay keeps exactly the working set that is on the
 			// wire alive, and no more — which is why the TTL itself does
 			// not need to change.
+			//
+			// If the store will not hand it back, DROP the replay and let
+			// the original through. That costs a prompt-cache miss on this
+			// block, which is real; putting a marker the model cannot
+			// dereference into the frozen prefix costs the model sight of
+			// its own work for the rest of the session, which is worse.
+			//
+			// Forget the entry as well. The block sits below the frozen
+			// floor, so the fresh pass can never reach it again — the entry
+			// can only fail this same way on every later turn, costing a
+			// store read each time. The staleness sweep would not collect
+			// it either, because replay looks it up every turn and that is
+			// exactly what marks an entry live.
 			if opts.Store != nil {
 				opts.Store.Put(hash, s.text)
+				// The canonical entry is not the only one the replayed
+				// text names. The heuristic compressors append their own
+				// inline "hash=" marker keyed with ComputeKeyMD5 over the
+				// same input, and that entry expires on the same TTL. Only
+				// the canonical one is rebuildable from `hash`, so refresh
+				// the MD5 one too — but only when the text actually names
+				// it, or this would write an orphan no marker points at.
+				//
+				// An intermediate hash from a multi-step chain cannot be
+				// rebuilt from the body at all. storeResolves below then
+				// declines the replay, which is the right answer: a
+				// dangling marker is worse than a cache miss.
+				if md5 := ccr.ComputeKeyMD5([]byte(s.text)); strings.Contains(compressed, md5) {
+					opts.Store.Put(md5, s.text)
+				}
+				if !storeResolves(opts.Store, hash, s.text, compressed) {
+					opts.Replay.Forget(hash)
+					outcomes = append(outcomes, BlockOutcome{
+						MessageIndex: msgIdx, Index: s.blockIndex,
+						BlockType: s.blockType, Action: "store_unresolvable", CacheKey: hash})
+					continue
+				}
 			}
 
 			b := tok.CountText(s.text)
