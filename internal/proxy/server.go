@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dobbo-ca/headroom-go/internal/cachestab"
@@ -50,6 +51,10 @@ type Server struct {
 	// every later turn. Unlike drift this DOES reach the bytes forwarded
 	// upstream, so it is nil unless Config.Replay is on.
 	replay *cachestab.ReplayState
+	// reqCount counts requests that reached handleForward, regardless of
+	// whether compression applied. Used by wrap to detect a bypassed proxy
+	// (bead hr-sw9).
+	reqCount atomic.Int64
 }
 
 // New builds a Server. The HTTP client deliberately has NO client-wide
@@ -159,4 +164,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// RequestCount returns the number of requests that reached handleForward since
+// this Server was created. Counts arrivals, not compressions: an uncompressed
+// turn still increments the counter.
+func (s *Server) RequestCount() int64 {
+	return s.reqCount.Load()
 }

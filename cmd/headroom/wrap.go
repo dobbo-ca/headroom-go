@@ -51,6 +51,16 @@ func agentSpecFor(name string) (agentSpec, bool) {
 
 func supportedAgents() string { return "claude, codex" }
 
+// isTruthy reports whether s is a truthy value (1, true, yes, on).
+func isTruthy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // agentBaseURL is the value the agent's env var receives.
 func agentBaseURL(spec agentSpec, base string) string {
 	return strings.TrimRight(base, "/") + spec.URLPath
@@ -119,37 +129,63 @@ func newWrapCmd() *cobra.Command {
 			base := cfg.ProxyURL
 			client := &http.Client{Timeout: 2 * time.Second}
 
+			// GUARD 1: Claude Code routes requests when BEDROCK or VERTEX is set,
+			// bypassing the base URL env var. Warn the user that the proxy will see
+			// nothing (bead hr-sw9). The flag HEADROOM_BYPASS_OK=1 silences this
+			// because a false measurement is less hostile than a hard exit.
+			if !isTruthy(os.Getenv("HEADROOM_BYPASS_OK")) {
+				bypass := ""
+				if isTruthy(os.Getenv("CLAUDE_CODE_USE_BEDROCK")) {
+					bypass = "CLAUDE_CODE_USE_BEDROCK"
+				} else if isTruthy(os.Getenv("CLAUDE_CODE_USE_VERTEX")) {
+					bypass = "CLAUDE_CODE_USE_VERTEX"
+				}
+				if bypass != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n"+
+						"headroom: WARNING: %s is set. The agent will BYPASS the proxy.\n"+
+						"          %s is ignored when this is set.\n"+
+						"          The ledger will show zero requests. Every measurement will be wrong.\n"+
+						"          To fix: unset %s or set it to 0.\n"+
+						"          To suppress this warning: HEADROOM_BYPASS_OK=1\n\n", bypass, spec.EnvVar, bypass)
+				}
+			}
+
 			// storePath and replayOn must describe the proxy that will
 			// actually serve this session, which is not always the one
 			// this process would have configured.
 			storePath, replayOn := cfg.CCRPath, false
 
+			// ownProxy is set when wrap starts its own proxy (not reusing an
+			// existing one). Guard 2 checks its RequestCount after the agent exits.
+			var ownProxy *proxy.Server
+
 			if h, running := probeProxy(client, base); running {
 				storePath, replayOn = h.CCRPath, h.Replay
-				fmt.Fprintf(os.Stderr, "headroom: reusing the proxy already listening at %s\n", base)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: reusing the proxy already listening at %s\n", base)
 			} else {
 				pcfg, err := proxyConfigFor(spec, base, upstream)
 				if err != nil {
 					return err
 				}
 				replayOn = pcfg.Replay
-				stop, err := startProxy(cmd.Context(), pcfg, cfg)
+				srv, stop, err := startProxy(cmd.Context(), pcfg, cfg)
 				if err != nil {
 					return err
 				}
+				ownProxy = srv
 				// The proxy is a goroutine in THIS process, so it cannot
 				// outlive the agent and cannot die behind its back.
 				defer stop()
 				if err := waitForProxy(client, base, 45*time.Second); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "headroom: proxy listening on %s -> %s\n", pcfg.Listen, pcfg.Upstream)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: proxy listening on %s -> %s\n", pcfg.Listen, pcfg.Upstream)
 			}
 
 			mcpArgs, blocked := mcpFlags(spec, storePath, base)
 			switch {
 			case blocked == "":
-				fmt.Fprintf(os.Stderr, "headroom: MCP retrieval wired to %s\n", storePath)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: MCP retrieval wired to %s\n", storePath)
 			case replayOn:
 				// Fail CLOSED. With replay on, every marker headroom
 				// writes stays on the wire for the rest of the session,
@@ -160,7 +196,7 @@ func newWrapCmd() *cobra.Command {
 					"Set HEADROOM_PROXY_REPLAY=off to run without replay", spec.Binary, blocked)
 			default:
 				// Fail OPEN. Without replay a marker survives one turn.
-				fmt.Fprintf(os.Stderr,
+				fmt.Fprintf(cmd.ErrOrStderr(),
 					"headroom: warning: no retrieval tool for %s: %s\n", spec.Binary, blocked)
 			}
 
@@ -170,9 +206,38 @@ func newWrapCmd() *cobra.Command {
 			}
 
 			agentCmd := exec.Command(bin, append(mcpArgs, args[1:]...)...)
+			// The child env gets the base URL and NOTHING ELSE. wrap must never
+			// rewrite CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX to get the
+			// agent onto the proxy: that silently moves a session to a different
+			// PROVIDER, with different credentials and a different bill, which is a
+			// bigger surprise than the bypass it works around. Guard 1 says the
+			// routing var is set and names the fix; the user decides.
 			agentCmd.Env = append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
 			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			return agentCmd.Run()
+			agentErr := agentCmd.Run()
+
+			// GUARD 2: The agent exited having sent zero requests to the proxy we
+			// started. This catches a bypassed proxy (the Bedrock/Vertex routing
+			// Guard 1 warns about), a typo'd env var, or an agent that never
+			// started. When reusing an existing proxy we cannot check this, because
+			// we do not own that server and its RequestCount includes other sessions
+			// (bead hr-sw9).
+			if ownProxy != nil && ownProxy.RequestCount() == 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n"+
+					"headroom: WARNING: The agent exited but sent ZERO requests through the proxy.\n"+
+					"          Possible causes:\n"+
+					"            - A routing env var is set (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX)\n"+
+					"              -> unset it or set it to 0\n"+
+					"            - The base URL env var (%s) was overridden elsewhere\n"+
+					"              -> remove the override\n"+
+					"            - The agent never started (check the exit status above)\n"+
+					"          The ledger is empty.\n\n", spec.EnvVar)
+			}
+
+			if agentErr != nil {
+				return agentErr
+			}
+			return nil
 		},
 	}
 
@@ -202,12 +267,14 @@ func proxyConfigFor(spec agentSpec, base, upstream string) (proxy.Config, error)
 	return proxy.Load(proxy.Overrides{Upstream: upstream, Listen: u.Host})
 }
 
-// startProxy runs the proxy in this process and returns a function that stops
-// it and waits for the listener to drain.
-func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func(), error) {
+// startProxy runs the proxy in this process and returns the Server and a
+// function that stops it and waits for the listener to drain. The Server is
+// returned so wrap can check RequestCount after the agent exits (Guard 2,
+// bead hr-sw9).
+func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (*proxy.Server, func(), error) {
 	srv, err := newProxyServer(pcfg, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -218,7 +285,7 @@ func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func
 			fmt.Fprintln(os.Stderr, "headroom: proxy stopped:", err)
 		}
 	}()
-	return func() { cancel(); <-done }, nil
+	return srv, func() { cancel(); <-done }, nil
 }
 
 // mcpFlags builds the agent flags that point it at `headroom mcp serve` on
