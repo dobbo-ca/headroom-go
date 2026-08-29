@@ -141,7 +141,7 @@ func newWrapCmd() *cobra.Command {
 					bypass = "CLAUDE_CODE_USE_VERTEX"
 				}
 				if bypass != "" {
-					fmt.Fprintf(os.Stderr, "\n"+
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n"+
 						"headroom: WARNING: %s is set. The agent will BYPASS the proxy.\n"+
 						"          %s is ignored when this is set.\n"+
 						"          The ledger will show zero requests. Every measurement will be wrong.\n"+
@@ -206,15 +206,13 @@ func newWrapCmd() *cobra.Command {
 			}
 
 			agentCmd := exec.Command(bin, append(mcpArgs, args[1:]...)...)
-			// Override bypass vars to 0 so the agent does not route around the proxy.
-			childEnv := append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
-			if isTruthy(os.Getenv("CLAUDE_CODE_USE_BEDROCK")) {
-				childEnv = append(childEnv, "CLAUDE_CODE_USE_BEDROCK=0")
-			}
-			if isTruthy(os.Getenv("CLAUDE_CODE_USE_VERTEX")) {
-				childEnv = append(childEnv, "CLAUDE_CODE_USE_VERTEX=0")
-			}
-			agentCmd.Env = childEnv
+			// The child env gets the base URL and NOTHING ELSE. wrap must never
+			// rewrite CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX to get the
+			// agent onto the proxy: that silently moves a session to a different
+			// PROVIDER, with different credentials and a different bill, which is a
+			// bigger surprise than the bypass it works around. Guard 1 says the
+			// routing var is set and names the fix; the user decides.
+			agentCmd.Env = append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
 			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 			agentErr := agentCmd.Run()
 
@@ -225,7 +223,7 @@ func newWrapCmd() *cobra.Command {
 			// we do not own that server and its RequestCount includes other sessions
 			// (bead hr-sw9).
 			if ownProxy != nil && ownProxy.RequestCount() == 0 {
-				fmt.Fprintf(os.Stderr, "\n"+
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n"+
 					"headroom: WARNING: The agent exited but sent ZERO requests through the proxy.\n"+
 					"          Possible causes:\n"+
 					"            - A routing env var is set (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX)\n"+
