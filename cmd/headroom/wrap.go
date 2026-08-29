@@ -51,6 +51,16 @@ func agentSpecFor(name string) (agentSpec, bool) {
 
 func supportedAgents() string { return "claude, codex" }
 
+// isTruthy reports whether s is a truthy value (1, true, yes, on).
+func isTruthy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // agentBaseURL is the value the agent's env var receives.
 func agentBaseURL(spec agentSpec, base string) string {
 	return strings.TrimRight(base, "/") + spec.URLPath
@@ -120,22 +130,23 @@ func newWrapCmd() *cobra.Command {
 			client := &http.Client{Timeout: 2 * time.Second}
 
 			// GUARD 1: Claude Code routes requests when BEDROCK or VERTEX is set,
-			// bypassing ANTHROPIC_BASE_URL. Warn the user that the proxy will see
+			// bypassing the base URL env var. Warn the user that the proxy will see
 			// nothing (bead hr-sw9). The flag HEADROOM_BYPASS_OK=1 silences this
 			// because a false measurement is less hostile than a hard exit.
-			if os.Getenv("HEADROOM_BYPASS_OK") != "1" {
+			if !isTruthy(os.Getenv("HEADROOM_BYPASS_OK")) {
 				bypass := ""
-				if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "" {
+				if isTruthy(os.Getenv("CLAUDE_CODE_USE_BEDROCK")) {
 					bypass = "CLAUDE_CODE_USE_BEDROCK"
-				} else if os.Getenv("CLAUDE_CODE_USE_VERTEX") != "" {
+				} else if isTruthy(os.Getenv("CLAUDE_CODE_USE_VERTEX")) {
 					bypass = "CLAUDE_CODE_USE_VERTEX"
 				}
 				if bypass != "" {
 					fmt.Fprintf(os.Stderr, "\n"+
 						"headroom: WARNING: %s is set. The agent will BYPASS the proxy.\n"+
-						"          ANTHROPIC_BASE_URL is ignored when this is set.\n"+
+						"          %s is ignored when this is set.\n"+
 						"          The ledger will show zero requests. Every measurement will be wrong.\n"+
-						"          Set HEADROOM_BYPASS_OK=1 to suppress this warning.\n\n", bypass)
+						"          To fix: unset %s or set it to 0.\n"+
+						"          To suppress this warning: HEADROOM_BYPASS_OK=1\n\n", bypass, spec.EnvVar, bypass)
 				}
 			}
 
@@ -195,11 +206,17 @@ func newWrapCmd() *cobra.Command {
 			}
 
 			agentCmd := exec.Command(bin, append(mcpArgs, args[1:]...)...)
-			agentCmd.Env = append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
-			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			if err := agentCmd.Run(); err != nil {
-				return err
+			// Override bypass vars to 0 so the agent does not route around the proxy.
+			childEnv := append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
+			if isTruthy(os.Getenv("CLAUDE_CODE_USE_BEDROCK")) {
+				childEnv = append(childEnv, "CLAUDE_CODE_USE_BEDROCK=0")
 			}
+			if isTruthy(os.Getenv("CLAUDE_CODE_USE_VERTEX")) {
+				childEnv = append(childEnv, "CLAUDE_CODE_USE_VERTEX=0")
+			}
+			agentCmd.Env = childEnv
+			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			agentErr := agentCmd.Run()
 
 			// GUARD 2: The agent exited having sent zero requests to the proxy we
 			// started. This catches a bypassed proxy (the Bedrock/Vertex routing
@@ -210,9 +227,17 @@ func newWrapCmd() *cobra.Command {
 			if ownProxy != nil && ownProxy.RequestCount() == 0 {
 				fmt.Fprintf(os.Stderr, "\n"+
 					"headroom: WARNING: The agent exited but sent ZERO requests through the proxy.\n"+
-					"          Possible causes: the agent bypassed the proxy, a routing env var is set\n"+
-					"          (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX), a typo in the base URL,\n"+
-					"          or the agent never started. The ledger is empty.\n\n")
+					"          Possible causes:\n"+
+					"            - A routing env var is set (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX)\n"+
+					"              -> unset it or set it to 0\n"+
+					"            - The base URL env var (%s) was overridden elsewhere\n"+
+					"              -> remove the override\n"+
+					"            - The agent never started (check the exit status above)\n"+
+					"          The ledger is empty.\n\n", spec.EnvVar)
+			}
+
+			if agentErr != nil {
+				return agentErr
 			}
 			return nil
 		},
