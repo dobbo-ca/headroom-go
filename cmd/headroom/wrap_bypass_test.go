@@ -332,3 +332,71 @@ func TestWrapWarnsZeroRequestsEvenOnNonZeroExit(t *testing.T) {
 		t.Errorf("Guard 2 did not warn on zero requests with non-zero exit; stderr:\n%s", stderr)
 	}
 }
+
+// TestWrapDoesNotWarnZeroRequestsOnAReusedProxy pins the documented limit of
+// Guard 2. When wrap reuses a proxy it did not start, that server's
+// RequestCount includes every other session using it, so wrap cannot tell
+// whether THIS agent sent anything and must stay quiet.
+//
+// Without this test, widening the guard to `ownProxy == nil || ...` ships a
+// false "you sent ZERO requests" on every reuse session, and a warning that
+// cries wolf is how a real bypass gets ignored later.
+func TestWrapDoesNotWarnZeroRequestsOnAReusedProxy(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "ccr.db")
+	// healthz stands in for a proxy already listening, so wrap takes the reuse
+	// path and ownProxy stays nil.
+	p := healthz(t, proxy.Health{Version: "test", CCRPath: store})
+	_, _ = fakeAgent(t, "claude", "echo ran > \"$HEADROOM_TEST_OUT\"\n")
+	t.Setenv("HEADROOM_PROXY_URL", p.URL)
+	t.Setenv("HEADROOM_CCR_PATH", store)
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "")
+
+	stderr, err := wrapStderr(t, "wrap", "claude")
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	if !strings.Contains(stderr, "reusing the proxy") {
+		t.Fatalf("fixture never took the reuse path, so it cannot pin the guard; stderr:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "ZERO requests") {
+		t.Errorf("Guard 2 warned on a reused proxy, whose count is not ours to read; stderr:\n%s", stderr)
+	}
+}
+
+// TestWrapLeavesTheAgentsProviderRoutingAlone is a regression pin, and the
+// behaviour it forbids was briefly shipped on this branch.
+//
+// Forcing CLAUDE_CODE_USE_BEDROCK=0 into the child env does get the agent onto
+// the proxy, which is why it is tempting. It also moves the session to a
+// different PROVIDER, with different credentials and a different bill, to make
+// a measurement work. Guard 1 warns and names the fix; the choice is the
+// user's. Only a comment guarded this before.
+func TestWrapLeavesTheAgentsProviderRoutingAlone(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "ccr.db")
+	p := healthz(t, proxy.Health{Version: "test", CCRPath: store})
+	// The fake agent reports the routing vars it was actually handed.
+	_, out := fakeAgent(t, "claude",
+		"echo \"BEDROCK=[$CLAUDE_CODE_USE_BEDROCK] VERTEX=[$CLAUDE_CODE_USE_VERTEX]\" > \"$HEADROOM_TEST_OUT\"\n")
+	t.Setenv("HEADROOM_PROXY_URL", p.URL)
+	t.Setenv("HEADROOM_CCR_PATH", store)
+	t.Setenv("HEADROOM_BYPASS_OK", "1") // Silence Guard 1; this test is about the env.
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+
+	if _, err := wrapStderr(t, "wrap", "claude"); err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("the agent never ran, so nothing was pinned: %v", err)
+	}
+	if want := "BEDROCK=[1] VERTEX=[1]"; !strings.Contains(string(got), want) {
+		t.Errorf("wrap rewrote the agent's provider routing.\ngot:  %s\nwant: %s\n"+
+			"Rerouting a session to another provider to make the proxy work is not wrap's call.",
+			strings.TrimSpace(string(got)), want)
+	}
+}

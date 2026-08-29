@@ -161,7 +161,7 @@ func newWrapCmd() *cobra.Command {
 
 			if h, running := probeProxy(client, base); running {
 				storePath, replayOn = h.CCRPath, h.Replay
-				fmt.Fprintf(os.Stderr, "headroom: reusing the proxy already listening at %s\n", base)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: reusing the proxy already listening at %s\n", base)
 			} else {
 				pcfg, err := proxyConfigFor(spec, base, upstream)
 				if err != nil {
@@ -179,13 +179,13 @@ func newWrapCmd() *cobra.Command {
 				if err := waitForProxy(client, base, 45*time.Second); err != nil {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "headroom: proxy listening on %s -> %s\n", pcfg.Listen, pcfg.Upstream)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: proxy listening on %s -> %s\n", pcfg.Listen, pcfg.Upstream)
 			}
 
 			mcpArgs, blocked := mcpFlags(spec, storePath, base)
 			switch {
 			case blocked == "":
-				fmt.Fprintf(os.Stderr, "headroom: MCP retrieval wired to %s\n", storePath)
+				fmt.Fprintf(cmd.ErrOrStderr(), "headroom: MCP retrieval wired to %s\n", storePath)
 			case replayOn:
 				// Fail CLOSED. With replay on, every marker headroom
 				// writes stays on the wire for the rest of the session,
@@ -196,7 +196,7 @@ func newWrapCmd() *cobra.Command {
 					"Set HEADROOM_PROXY_REPLAY=off to run without replay", spec.Binary, blocked)
 			default:
 				// Fail OPEN. Without replay a marker survives one turn.
-				fmt.Fprintf(os.Stderr,
+				fmt.Fprintf(cmd.ErrOrStderr(),
 					"headroom: warning: no retrieval tool for %s: %s\n", spec.Binary, blocked)
 			}
 

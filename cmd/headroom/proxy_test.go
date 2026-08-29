@@ -200,7 +200,13 @@ func runProxy(t *testing.T, args ...string) string {
 	})
 
 	base := "http://" + addr
-	for i := 0; i < 200; i++ {
+	// 20s, not the 2s this used to allow. The old budget failed about 1 run in 6
+	// once this package grew tests that start real subprocesses, because they
+	// compete for the same machine while the proxy is coming up. A startup
+	// timeout that scales with unrelated tests in the same package reports a
+	// flake as a failure, and a suite people learn to re-run is a suite that
+	// stops catching things.
+	for i := 0; i < 2000; i++ {
 		resp, err := http.Get(base + "/healthz")
 		if err == nil {
 			resp.Body.Close()
