@@ -58,7 +58,7 @@ func TestWrapStartedProxyRecordsToTheLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stop, err := startProxy(context.Background(), pcfg, cfg)
+	_, stop, err := startProxy(context.Background(), pcfg, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

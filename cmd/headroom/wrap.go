@@ -119,10 +119,34 @@ func newWrapCmd() *cobra.Command {
 			base := cfg.ProxyURL
 			client := &http.Client{Timeout: 2 * time.Second}
 
+			// GUARD 1: Claude Code routes requests when BEDROCK or VERTEX is set,
+			// bypassing ANTHROPIC_BASE_URL. Warn the user that the proxy will see
+			// nothing (bead hr-sw9). The flag HEADROOM_BYPASS_OK=1 silences this
+			// because a false measurement is less hostile than a hard exit.
+			if os.Getenv("HEADROOM_BYPASS_OK") != "1" {
+				bypass := ""
+				if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "" {
+					bypass = "CLAUDE_CODE_USE_BEDROCK"
+				} else if os.Getenv("CLAUDE_CODE_USE_VERTEX") != "" {
+					bypass = "CLAUDE_CODE_USE_VERTEX"
+				}
+				if bypass != "" {
+					fmt.Fprintf(os.Stderr, "\n"+
+						"headroom: WARNING: %s is set. The agent will BYPASS the proxy.\n"+
+						"          ANTHROPIC_BASE_URL is ignored when this is set.\n"+
+						"          The ledger will show zero requests. Every measurement will be wrong.\n"+
+						"          Set HEADROOM_BYPASS_OK=1 to suppress this warning.\n\n", bypass)
+				}
+			}
+
 			// storePath and replayOn must describe the proxy that will
 			// actually serve this session, which is not always the one
 			// this process would have configured.
 			storePath, replayOn := cfg.CCRPath, false
+
+			// ownProxy is set when wrap starts its own proxy (not reusing an
+			// existing one). Guard 2 checks its RequestCount after the agent exits.
+			var ownProxy *proxy.Server
 
 			if h, running := probeProxy(client, base); running {
 				storePath, replayOn = h.CCRPath, h.Replay
@@ -133,10 +157,11 @@ func newWrapCmd() *cobra.Command {
 					return err
 				}
 				replayOn = pcfg.Replay
-				stop, err := startProxy(cmd.Context(), pcfg, cfg)
+				srv, stop, err := startProxy(cmd.Context(), pcfg, cfg)
 				if err != nil {
 					return err
 				}
+				ownProxy = srv
 				// The proxy is a goroutine in THIS process, so it cannot
 				// outlive the agent and cannot die behind its back.
 				defer stop()
@@ -172,7 +197,24 @@ func newWrapCmd() *cobra.Command {
 			agentCmd := exec.Command(bin, append(mcpArgs, args[1:]...)...)
 			agentCmd.Env = append(os.Environ(), spec.EnvVar+"="+agentBaseURL(spec, base))
 			agentCmd.Stdin, agentCmd.Stdout, agentCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			return agentCmd.Run()
+			if err := agentCmd.Run(); err != nil {
+				return err
+			}
+
+			// GUARD 2: The agent exited having sent zero requests to the proxy we
+			// started. This catches a bypassed proxy (the Bedrock/Vertex routing
+			// Guard 1 warns about), a typo'd env var, or an agent that never
+			// started. When reusing an existing proxy we cannot check this, because
+			// we do not own that server and its RequestCount includes other sessions
+			// (bead hr-sw9).
+			if ownProxy != nil && ownProxy.RequestCount() == 0 {
+				fmt.Fprintf(os.Stderr, "\n"+
+					"headroom: WARNING: The agent exited but sent ZERO requests through the proxy.\n"+
+					"          Possible causes: the agent bypassed the proxy, a routing env var is set\n"+
+					"          (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX), a typo in the base URL,\n"+
+					"          or the agent never started. The ledger is empty.\n\n")
+			}
+			return nil
 		},
 	}
 
@@ -202,12 +244,14 @@ func proxyConfigFor(spec agentSpec, base, upstream string) (proxy.Config, error)
 	return proxy.Load(proxy.Overrides{Upstream: upstream, Listen: u.Host})
 }
 
-// startProxy runs the proxy in this process and returns a function that stops
-// it and waits for the listener to drain.
-func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func(), error) {
+// startProxy runs the proxy in this process and returns the Server and a
+// function that stops it and waits for the listener to drain. The Server is
+// returned so wrap can check RequestCount after the agent exits (Guard 2,
+// bead hr-sw9).
+func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (*proxy.Server, func(), error) {
 	srv, err := newProxyServer(pcfg, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -218,7 +262,7 @@ func startProxy(ctx context.Context, pcfg proxy.Config, cfg config.Config) (func
 			fmt.Fprintln(os.Stderr, "headroom: proxy stopped:", err)
 		}
 	}()
-	return func() { cancel(); <-done }, nil
+	return srv, func() { cancel(); <-done }, nil
 }
 
 // mcpFlags builds the agent flags that point it at `headroom mcp serve` on

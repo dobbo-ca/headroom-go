@@ -29,6 +29,8 @@ const internalHeaderPrefix = "x-headroom-"
 // It only chooses the REQUEST body and reports what it did; the hop itself is
 // s.fwd. The RESPONSE is never compressed or rewritten (spec 9 risk 4).
 func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
+	s.reqCount.Add(1)
+
 	body, err := s.readBody(w, r)
 	if err != nil {
 		// readBody already wrote the status.
