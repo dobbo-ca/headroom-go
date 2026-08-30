@@ -2,6 +2,30 @@
 
 Project guidelines. Merge with global guidelines.
 
+## Starting a session here
+
+**Given no instruction — "continue", `/dobbo:start`, or nothing — run `bd ready`
+and work the P0 bead titled `SESSION BRIEF`.** Its description is the whole
+brief: where things stand, the goal as a question, the traps that will bite, and
+what a finished answer looks like. Read it before asking what to work on.
+There is at most one, and every other bead is P1 or lower, so a P0 here means
+"this is the session".
+
+Two things that mislead a fresh session, both measured:
+
+- **This checkout is usually stale.** Work happens in worktrees, so the primary
+  checkout's `main` sits months behind by design, and the session-start git
+  snapshot repeats its SHA — confirming the wrong answer rather than flagging it.
+  Run `git fetch origin && git log --oneline origin/main -3` and read from a
+  worktree cut from `origin/main`.
+- **`bd prime`'s output is larger than the host will show.** It arrives
+  truncated to a preview, so memories past the first page are absent from
+  context. Read the persisted hook output when it says it was truncated; that is
+  where the hard-won detail lives.
+
+When the briefed work is done, close that bead and leave the next `SESSION BRIEF`
+behind for whatever the work actually revealed.
+
 ## What this is
 
 Clean-room Go port of headroom (chopratejas/headroom). See
